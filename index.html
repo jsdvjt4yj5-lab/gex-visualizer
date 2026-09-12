@@ -22,6 +22,24 @@
     margin: 16px 0;
   }
   input[type="file"] { color: #eee; }
+  #dropZone {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    border: 1.5px dashed #333;
+    border-radius: 8px;
+    padding: 14px;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  #dropZone.drag-over {
+    border-color: #199e70;
+    background: rgba(25, 158, 112, 0.08);
+  }
+  #dropZoneLabel {
+    font-size: 12.5px;
+    color: #777;
+  }
   select, button {
     background: #1a1a1a;
     color: #eee;
@@ -57,7 +75,10 @@
 </p>
 
 <div class="controls">
-  <input type="file" id="fileInput" accept="image/*" />
+  <div id="dropZone">
+    <input type="file" id="fileInput" accept="image/*" />
+    <span id="dropZoneLabel">or drag and drop a screenshot here</span>
+  </div>
   <select id="readType">
     <option value="daily">Daily read</option>
     <option value="weekly">Weekly read</option>
@@ -99,6 +120,8 @@ const PARSE_ENDPOINT = '/api/parse-gex'; // adjust if hosted elsewhere
 const ANALYZE_ENDPOINT = '/api/analyze-gex';
 const WEEKLY_ENDPOINT = '/api/analyze-weekly';
 const fileInput = document.getElementById('fileInput');
+const dropZone = document.getElementById('dropZone');
+const dropZoneLabel = document.getElementById('dropZoneLabel');
 const parseBtn = document.getElementById('parseBtn');
 const pdfBtn = document.getElementById('pdfBtn');
 const readTypeSelect = document.getElementById('readType');
@@ -120,9 +143,49 @@ let currentData = null;
 let currentAnalysis = null;
 let currentWeekly = null;
 
+function setSelectedFile(file) {
+  if (!file) return;
+  if (!file.type.startsWith('image/')) {
+    setStatus('Please drop an image file (screenshot).', true);
+    return;
+  }
+  selectedFile = file;
+  parseBtn.disabled = false;
+  dropZoneLabel.textContent = file.name;
+  setStatus('');
+}
+
 fileInput.addEventListener('change', (e) => {
-  selectedFile = e.target.files[0] || null;
-  parseBtn.disabled = !selectedFile;
+  setSelectedFile(e.target.files[0] || null);
+});
+
+['dragenter', 'dragover'].forEach((evt) => {
+  dropZone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dropZone.classList.add('drag-over');
+  });
+});
+
+['dragleave', 'dragend'].forEach((evt) => {
+  dropZone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dropZone.classList.remove('drag-over');
+  });
+});
+
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  dropZone.classList.remove('drag-over');
+  const file = e.dataTransfer.files && e.dataTransfer.files[0];
+  setSelectedFile(file);
+});
+
+// Prevent the browser from navigating to the dropped file if it misses the zone.
+['dragover', 'drop'].forEach((evt) => {
+  window.addEventListener(evt, (e) => e.preventDefault());
 });
 
 function setStatus(msg, isError = false) {
