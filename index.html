@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>GEX Visualizer</title>
+<style>
+  body {
+    font-family: -apple-system, Helvetica, Arial, sans-serif;
+    background: #0d0d0d;
+    color: #eee;
+    max-width: 700px;
+    margin: 0 auto;
+    padding: 20px;
+  }
+  h1 { font-size: 20px; font-weight: 600; }
+  .controls {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin: 16px 0;
+  }
+  input[type="file"] { color: #eee; }
+  select, button {
+    background: #1a1a1a;
+    color: #eee;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 14px;
+  }
+  button { cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .status { font-size: 13px; color: #999; margin: 8px 0; min-height: 18px; }
+  .status.error { color: #e66767; }
+  #chartWrap { position: relative; width: 100%; margin-top: 20px; }
+  .history { margin-top: 24px; }
+  .history h2 { font-size: 15px; color: #aaa; }
+  .history-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid #222;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .history-item:hover { color: #fff; }
+</style>
+</head>
+<body>
+
+<h1>GEX Visualizer</h1>
+<p style="font-size: 13px; color: #999;">
+  Upload a Bullflow GEX screenshot you took manually. Nothing here ever
+  talks to Bullflow directly.
+</p>
+
+<div class="controls">
+  <input type="file" id="fileInput" accept="image/*" />
+  <select id="readType">
+    <option value="daily">Daily read</option>
+    <option value="weekly">Weekly read</option>
+  </select>
+  <button id="parseBtn" disabled>Parse and visualize</button>
+  <button id="pdfBtn" disabled>Download PDF</button>
+</div>
+
+<div class="status" id="status"></div>
+
+<div id="chartWrap" style="height: 0;">
+  <canvas id="gexChart" role="img" aria-label="GEX by strike"></canvas>
+</div>
+
+<div id="analysisBox" style="display:none; margin-top:16px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+
+<div class="history">
+  <h2>History</h2>
+  <div class="controls" style="margin-top:0;">
+    <select id="tickerFilter"><option value="">All tickers</option></select>
+    <button id="weeklyBtn" disabled>Generate weekly read</button>
+  </div>
+  <div id="historyList"></div>
+</div>
+
+<div id="weeklyBox" style="display:none; margin-top:16px;">
+  <h2 style="font-size:15px; color:#aaa;">Weekly read</h2>
+  <div id="weeklyAnalysisText" style="padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+  <div id="weeklyChartWrap" style="position:relative; height:0; margin-top:16px;">
+    <canvas id="weeklyChart"></canvas>
+  </div>
+  <button id="weeklyPdfBtn" style="margin-top:12px;">Download weekly PDF</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script>
+const PARSE_ENDPOINT = '/api/parse-gex'; // adjust if hosted elsewhere
+const ANALYZE_ENDPOINT = '/api/analyze-gex';
+const WEEKLY_ENDPOINT = '/api/analyze-weekly';
+const fileInput = document.getElementById('fileInput');
+const parseBtn = document.getElementById('parseBtn');
+const pdfBtn = document.getElementById('pdfBtn');
+const readTypeSelect = document.getElementById('readType');
+const statusEl = document.getElementById('status');
+const chartWrap = document.getElementById('chartWrap');
+const historyList = document.getElementById('historyList');
+const analysisBox = document.getElementById('analysisBox');
+const tickerFilter = document.getElementById('tickerFilter');
+const weeklyBtn = document.getElementById('weeklyBtn');
+const weeklyBox = document.getElementById('weeklyBox');
+const weeklyAnalysisText = document.getElementById('weeklyAnalysisText');
+const weeklyChartWrap = document.getElementById('weeklyChartWrap');
+const weeklyPdfBtn = document.getElementById('weeklyPdfBtn');
+
+let selectedFile = null;
+let chartInstance = null;
+let weeklyChartInstance = null;
+let currentData = null;
+let currentAnalysis = null;
+let currentWeekly = null;
+
+fileInput.addEventListener('change', (e) => {
+  selectedFile = e.target.files[0] || null;
+  parseBtn.disabled = !selectedFile;
+});
+
+function setStatus(msg, isError = false) {
+  statusEl.textContent = msg;
+  statusEl.className = 'status' + (isError ? ' error' : '');
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function parseAndVisualize() {
+  if (!selectedFile) return;
+  parseBtn.disabled = true;
+  setStatus('Reading image...');
+
+  try {
+    const base64 = await fileToBase64(selectedFile);
+    setStatus('Parsing with Claude...');
+
+    const res = await fetch(PARSE_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image: base64,
+        media_type: selectedFile.type || 'image/jpeg',
+        read_type: readTypeSelect.value,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Request failed (${res.status})`);
+    }
+
+    const data = await res.json();
+    currentData = data;
+    renderChart(data);
+    setStatus('Writing analysis...');
+
+    const analysisRes = await fetch(ANALYZE_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data }),
+    });
+
+    if (analysisRes.ok) {
+      const { analysis } = await analysisRes.json();
+      currentAnalysis = analysis;
+      data.analysis = analysis;
+      analysisBox.textContent = analysis;
+      analysisBox.style.display = 'block';
+    } else {
+      currentAnalysis = null;
+      analysisBox.style.display = 'none';
+    }
+
+    saveToHistory(data);
+    pdfBtn.disabled = false;
+    setStatus(`Parsed ${data.ticker} — ${data.expiration} (${data.levels.length} strikes)`);
+  } catch (err) {
+    setStatus(err.message, true);
+  } finally {
+    parseBtn.disabled = false;
+  }
+}
+
+async function downloadPdf() {
+  if (!currentData) return;
+  pdfBtn.disabled = true;
+  setStatus('Building PDF...');
+
+  try {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const margin = 48;
+    let y = margin;
+
+    doc.setFontSize(16);
+    doc.setFont(undefined, 'bold');
+    doc.text(`${currentData.ticker} GEX Summary`, margin, y);
+    y += 20;
+
+    doc.setFontSize(10);
+    doc.setFont(undefined, 'normal');
+    doc.setTextColor(100);
+    const meta = `Spot $${currentData.spot_price} · Expiration ${currentData.expiration} · ${currentData.read_type} read · ${new Date(currentData.captured_at).toLocaleString()}`;
+    doc.text(meta, margin, y);
+    y += 24;
+    doc.setTextColor(0);
+
+    // Chart image, captured from the live canvas
+    const canvas = document.getElementById('gexChart');
+    const imgData = canvas.toDataURL('image/png', 1.0);
+    const imgWidth = pageWidth - margin * 2;
+    const imgHeight = (canvas.height / canvas.width) * imgWidth;
+    doc.addImage(imgData, 'PNG', margin, y, imgWidth, imgHeight);
+    y += imgHeight + 24;
+
+    if (currentAnalysis) {
+      doc.setFontSize(12);
+      doc.setFont(undefined, 'bold');
+      doc.text('Analysis', margin, y);
+      y += 16;
+
+      doc.setFontSize(10.5);
+      doc.setFont(undefined, 'normal');
+      const lines = doc.splitTextToSize(currentAnalysis, pageWidth - margin * 2);
+      lines.forEach((line) => {
+        if (y > doc.internal.pageSize.getHeight() - margin) {
+          doc.addPage();
+          y = margin;
+        }
+        doc.text(line, margin, y);
+        y += 14;
+      });
+    }
+
+    doc.setFontSize(8);
+    doc.setTextColor(150);
+    doc.text(
+      'Generated from a manually captured screenshot. Not financial advice.',
+      margin,
+      doc.internal.pageSize.getHeight() - 24
+    );
+
+    doc.save(`${currentData.ticker}_GEX_${currentData.expiration}.pdf`);
+    setStatus('PDF downloaded.');
+  } catch (err) {
+    setStatus('PDF generation failed: ' + err.message, true);
+  } finally {
+    pdfBtn.disabled = false;
+  }
+}
+
+function renderChart(data) {
+  const labels = data.levels.map((l) => '$' + l.strike);
+  const values = data.levels.map((l) => l.net_gex_millions);
+  const colors = data.levels.map((l) =>
+    l.is_flip_zone ? '#eda100' : l.net_gex_millions >= 0 ? '#199e70' : '#e66767'
+  );
+
+  chartWrap.style.height = Math.max(300, data.levels.length * 32 + 80) + 'px';
+
+  if (chartInstance) chartInstance.destroy();
+
+  chartInstance = new Chart(document.getElementById('gexChart'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{ data: values, backgroundColor: colors, borderRadius: 4, barThickness: 20 }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const v = ctx.raw;
+              return (v < 0 ? '-' : '+') + '$' + Math.abs(v).toFixed(2) + 'M';
+            },
+          },
+        },
+        title: {
+          display: true,
+          text: `${data.ticker} · spot $${data.spot_price} · exp ${data.expiration}`,
+          color: '#ccc',
+          font: { size: 13, weight: 'normal' },
+        },
+      },
+      scales: {
+        x: {
+          grid: { color: 'rgba(150,150,150,0.15)' },
+          ticks: { color: '#999', callback: (v) => (v < 0 ? '-' : '+') + '$' + Math.abs(v) + 'M' },
+        },
+        y: { grid: { display: false }, ticks: { color: '#999' } },
+      },
+    },
+  });
+}
+
+function saveToHistory(data) {
+  const key = 'gex_history';
+  const existing = JSON.parse(localStorage.getItem(key) || '[]');
+  existing.unshift(data);
+  localStorage.setItem(key, JSON.stringify(existing.slice(0, 50)));
+  renderHistory();
+}
+
+function renderHistory() {
+  const existing = JSON.parse(localStorage.getItem('gex_history') || '[]');
+  historyList.innerHTML = '';
+
+  // Populate ticker filter options
+  const tickers = [...new Set(existing.map((i) => i.ticker))].sort();
+  const prevSelection = tickerFilter.value;
+  tickerFilter.innerHTML = '<option value="">All tickers</option>' +
+    tickers.map((t) => `<option value="${t}">${t}</option>`).join('');
+  tickerFilter.value = tickers.includes(prevSelection) ? prevSelection : '';
+
+  const filtered = tickerFilter.value
+    ? existing.filter((i) => i.ticker === tickerFilter.value)
+    : existing;
+
+  filtered.forEach((item) => {
+    const div = document.createElement('div');
+    div.className = 'history-item';
+    const when = new Date(item.captured_at).toLocaleString();
+    div.innerHTML = `<span>${item.ticker} · ${item.expiration} · ${item.read_type}</span><span>${when}</span>`;
+    div.addEventListener('click', () => {
+      currentData = item;
+      currentAnalysis = item.analysis || null;
+      renderChart(item);
+      if (currentAnalysis) {
+        analysisBox.textContent = currentAnalysis;
+        analysisBox.style.display = 'block';
+      } else {
+        analysisBox.style.display = 'none';
+      }
+      pdfBtn.disabled = false;
+    });
+    historyList.appendChild(div);
+  });
+
+  updateWeeklyButtonState();
+}
+
+function updateWeeklyButtonState() {
+  const eligible = getEligibleSnapshotsForWeekly();
+  weeklyBtn.disabled = eligible.length < 2;
+  weeklyBtn.textContent = eligible.length < 2
+    ? 'Generate weekly read (need 2+ same-ticker snapshots)'
+    : `Generate weekly read (${eligible.length} snapshots)`;
+}
+
+function getEligibleSnapshotsForWeekly() {
+  const existing = JSON.parse(localStorage.getItem('gex_history') || '[]');
+  const ticker = tickerFilter.value;
+  if (!ticker) return [];
+  // Same ticker, same expiration column, oldest to newest, most recent 7.
+  const sameTicker = existing.filter((i) => i.ticker === ticker);
+  const expirations = {};
+  sameTicker.forEach((s) => {
+    expirations[s.expiration] = (expirations[s.expiration] || 0) + 1;
+  });
+  const mostCommonExp = Object.entries(expirations).sort((a, b) => b[1] - a[1])[0]?.[0];
+  return sameTicker
+    .filter((s) => s.expiration === mostCommonExp)
+    .sort((a, b) => new Date(a.captured_at) - new Date(b.captured_at))
+    .slice(-7);
+}
+
+async function generateWeeklyRead() {
+  const snapshots = getEligibleSnapshotsForWeekly();
+  if (snapshots.length < 2) return;
+
+  weeklyBtn.disabled = true;
+  setStatus('Comparing snapshots...');
+
+  try {
+    const res = await fetch(WEEKLY_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ snapshots }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Request failed (${res.status})`);
+    }
+
+    const data = await res.json();
+    currentWeekly = data;
+    weeklyAnalysisText.textContent = data.analysis;
+    renderWeeklyChart(data);
+    weeklyBox.style.display = 'block';
+    setStatus(`Weekly read generated from ${data.snapshot_count} snapshots.`);
+  } catch (err) {
+    setStatus(err.message, true);
+  } finally {
+    updateWeeklyButtonState();
+  }
+}
+
+function renderWeeklyChart(data) {
+  const labels = data.deltas.map((d) => '$' + d.strike);
+  const changes = data.deltas.map((d) => d.change ?? 0);
+  const colors = changes.map((c) => (c >= 0 ? '#3b82f6' : '#f59e0b'));
+
+  weeklyChartWrap.style.height = Math.max(280, data.deltas.length * 30 + 60) + 'px';
+
+  if (weeklyChartInstance) weeklyChartInstance.destroy();
+
+  weeklyChartInstance = new Chart(document.getElementById('weeklyChart'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Change in Net GEX ($M) over period',
+        data: changes,
+        backgroundColor: colors,
+        borderRadius: 4,
+        barThickness: 18,
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        title: {
+          display: true,
+          text: `${data.ticker} · change from first to latest snapshot`,
+          color: '#ccc',
+          font: { size: 12, weight: 'normal' },
+        },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const v = ctx.raw;
+              return (v < 0 ? '' : '+') + v.toFixed(2) + 'M change';
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          grid: { color: 'rgba(150,150,150,0.15)' },
+          ticks: { color: '#999' },
+        },
+        y: { grid: { display: false }, ticks: { color: '#999' } },
+      },
+    },
+  });
+}
+
+async function downloadWeeklyPdf() {
+  if (!currentWeekly) return;
+  weeklyPdfBtn.disabled = true;
+
+  try {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const margin = 48;
+    let y = margin;
+
+    doc.setFontSize(16);
+    doc.setFont(undefined, 'bold');
+    doc.text(`${currentWeekly.ticker} Weekly GEX Read`, margin, y);
+    y += 20;
+
+    doc.setFontSize(10);
+    doc.setFont(undefined, 'normal');
+    doc.setTextColor(100);
+    const [from, to] = currentWeekly.date_range;
+    doc.text(
+      `${currentWeekly.snapshot_count} snapshots · ${new Date(from).toLocaleDateString()} to ${new Date(to).toLocaleDateString()}`,
+      margin, y
+    );
+    y += 24;
+    doc.setTextColor(0);
+
+    const canvas = document.getElementById('weeklyChart');
+    const imgData = canvas.toDataURL('image/png', 1.0);
+    const imgWidth = pageWidth - margin * 2;
+    const imgHeight = (canvas.height / canvas.width) * imgWidth;
+    doc.addImage(imgData, 'PNG', margin, y, imgWidth, imgHeight);
+    y += imgHeight + 24;
+
+    doc.setFontSize(12);
+    doc.setFont(undefined, 'bold');
+    doc.text('Weekly Analysis', margin, y);
+    y += 16;
+
+    doc.setFontSize(10.5);
+    doc.setFont(undefined, 'normal');
+    const lines = doc.splitTextToSize(currentWeekly.analysis, pageWidth - margin * 2);
+    lines.forEach((line) => {
+      if (y > doc.internal.pageSize.getHeight() - margin) {
+        doc.addPage();
+        y = margin;
+      }
+      doc.text(line, margin, y);
+      y += 14;
+    });
+
+    doc.setFontSize(8);
+    doc.setTextColor(150);
+    doc.text(
+      'Generated from manually captured screenshots. Not financial advice.',
+      margin,
+      doc.internal.pageSize.getHeight() - 24
+    );
+
+    doc.save(`${currentWeekly.ticker}_Weekly_GEX.pdf`);
+  } finally {
+    weeklyPdfBtn.disabled = false;
+  }
+}
+
+tickerFilter.addEventListener('change', () => { renderHistory(); weeklyBox.style.display = 'none'; });
+weeklyBtn.addEventListener('click', generateWeeklyRead);
+weeklyPdfBtn.addEventListener('click', downloadWeeklyPdf);
+
+parseBtn.addEventListener('click', parseAndVisualize);
+pdfBtn.addEventListener('click', downloadPdf);
+renderHistory();
+</script>
+</body>
+</html>

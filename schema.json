@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BullflowGexSnapshot",
+  "type": "object",
+  "required": ["ticker", "spot_price", "captured_at", "expiration", "levels"],
+  "properties": {
+    "ticker": {
+      "type": "string",
+      "description": "Underlying symbol, e.g. GOOGL"
+    },
+    "spot_price": {
+      "type": "number",
+      "description": "Current underlying price shown on the dashboard"
+    },
+    "captured_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the screenshot was taken (client timestamp, not from the image)"
+    },
+    "expiration": {
+      "type": "string",
+      "description": "The expiration date column being visualized, e.g. 2026-09-18"
+    },
+    "read_type": {
+      "type": "string",
+      "enum": ["daily", "weekly"],
+      "description": "Which horizon this snapshot is tagged as"
+    },
+    "levels": {
+      "type": "array",
+      "description": "One entry per strike row, ordered high to low as shown on screen",
+      "items": {
+        "type": "object",
+        "required": ["strike", "net_gex_millions"],
+        "properties": {
+          "strike": { "type": "number" },
+          "net_gex_millions": {
+            "type": "number",
+            "description": "Signed value in millions of dollars. Positive = dealer long gamma (green). Negative = dealer short gamma (red)."
+          },
+          "is_flip_zone": {
+            "type": "boolean",
+            "description": "True for the strike nearest spot_price where sign changes"
+          }
+        }
+      }
+    }
+  }
+}
