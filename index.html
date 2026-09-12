@@ -88,6 +88,7 @@
 </div>
 
 <div class="status" id="status"></div>
+<div id="maInfoBox" style="display:none; font-size:12.5px; color:#999; margin-bottom:4px;"></div>
 
 <div id="chartWrap" style="height: 0;">
   <canvas id="gexChart" role="img" aria-label="GEX by strike"></canvas>
@@ -119,6 +120,7 @@
 const PARSE_ENDPOINT = '/api/parse-gex'; // adjust if hosted elsewhere
 const ANALYZE_ENDPOINT = '/api/analyze-gex';
 const WEEKLY_ENDPOINT = '/api/analyze-weekly';
+const MA_ENDPOINT = '/api/get-ma';
 const fileInput = document.getElementById('fileInput');
 const dropZone = document.getElementById('dropZone');
 const dropZoneLabel = document.getElementById('dropZoneLabel');
@@ -129,6 +131,7 @@ const statusEl = document.getElementById('status');
 const chartWrap = document.getElementById('chartWrap');
 const historyList = document.getElementById('historyList');
 const analysisBox = document.getElementById('analysisBox');
+const maInfoBox = document.getElementById('maInfoBox');
 const tickerFilter = document.getElementById('tickerFilter');
 const weeklyBtn = document.getElementById('weeklyBtn');
 const weeklyBox = document.getElementById('weeklyBox');
@@ -142,6 +145,19 @@ let weeklyChartInstance = null;
 let currentData = null;
 let currentAnalysis = null;
 let currentWeekly = null;
+
+function showMaInfo(ma) {
+  if (!ma || (ma.ma30 == null && ma.ma200 == null)) {
+    maInfoBox.style.display = 'none';
+    return;
+  }
+  const parts = [];
+  if (ma.ma30 != null) parts.push(`30MA: $${ma.ma30}`);
+  if (ma.ma200 != null) parts.push(`200MA: $${ma.ma200}`);
+  else parts.push('200MA: not enough history');
+  maInfoBox.textContent = parts.join('  ·  ');
+  maInfoBox.style.display = 'block';
+}
 
 function setSelectedFile(file) {
   if (!file) return;
@@ -205,6 +221,7 @@ function fileToBase64(file) {
 async function parseAndVisualize() {
   if (!selectedFile) return;
   parseBtn.disabled = true;
+  maInfoBox.style.display = 'none';
   setStatus('Reading image...');
 
   try {
@@ -229,12 +246,28 @@ async function parseAndVisualize() {
     const data = await res.json();
     currentData = data;
     renderChart(data);
+    setStatus('Fetching moving averages...');
+
+    let movingAverages = null;
+    try {
+      const maRes = await fetch(`${MA_ENDPOINT}?symbol=${encodeURIComponent(data.ticker)}`);
+      if (maRes.ok) {
+        movingAverages = await maRes.json();
+        data.movingAverages = movingAverages;
+        showMaInfo(movingAverages);
+      } else {
+        maInfoBox.style.display = 'none';
+      }
+    } catch (e) {
+      maInfoBox.style.display = 'none';
+    }
+
     setStatus('Writing analysis...');
 
     const analysisRes = await fetch(ANALYZE_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data }),
+      body: JSON.stringify({ data, movingAverages }),
     });
 
     if (analysisRes.ok) {
@@ -278,7 +311,9 @@ async function downloadPdf() {
     doc.setFontSize(10);
     doc.setFont(undefined, 'normal');
     doc.setTextColor(100);
-    const meta = `Spot $${currentData.spot_price} · Expiration ${currentData.expiration} · ${currentData.read_type} read · ${new Date(currentData.captured_at).toLocaleString()}`;
+    const ma = currentData.movingAverages;
+    const maStr = ma ? ` · 30MA $${ma.ma30 ?? '—'} / 200MA ${ma.ma200 ?? 'n/a'}` : '';
+    const meta = `Spot $${currentData.spot_price} · Expiration ${currentData.expiration} · ${currentData.read_type} read · ${new Date(currentData.captured_at).toLocaleString()}${maStr}`;
     doc.text(meta, margin, y);
     y += 24;
     doc.setTextColor(0);
@@ -408,6 +443,7 @@ function renderHistory() {
       currentData = item;
       currentAnalysis = item.analysis || null;
       renderChart(item);
+      showMaInfo(item.movingAverages);
       if (currentAnalysis) {
         analysisBox.textContent = currentAnalysis;
         analysisBox.style.display = 'block';

@@ -6,7 +6,8 @@
 // what the wall structure implies, daily vs weekly framing.
 
 const SYSTEM_PROMPT = `You are a concise options-flow analyst. You receive
-structured GEX (gamma exposure) data for a single ticker and expiration and
+structured GEX (gamma exposure) data for a single ticker and expiration, and
+optionally the ticker's 30-day and 200-day simple moving averages. You
 produce a short written read, matching this style:
 
 - Identify the gamma flip zone (where sign changes near spot price)
@@ -15,6 +16,13 @@ produce a short written read, matching this style:
 - Explain the practical implication: positive gamma above tends to dampen
   moves / cap upside; negative gamma below tends to accelerate moves if
   breached
+- If moving averages are provided, check whether any major GEX wall (a
+  strike with unusually large magnitude) sits close to the MA30 or MA200
+  (within roughly 1% is worth calling out). When a wall and an MA
+  coincide, note that the two forms of support/resistance may be
+  reinforcing each other - a technical level and a dealer-hedging level at
+  the same price. Only mention this if there's a real coincidence; don't
+  force a connection that isn't there.
 - End with a one-line takeaway in plain language
 - If read_type is "weekly", frame the takeaway around the broader
   positioning picture rather than day-to-day noise; if "daily", focus on
@@ -29,7 +37,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Use POST' });
   }
 
-  const { data } = req.body || {};
+  const { data, movingAverages } = req.body || {};
   if (!data || !data.levels) {
     return res.status(400).json({ error: 'Missing "data" (parsed GEX JSON) in request body' });
   }
@@ -49,7 +57,9 @@ export default async function handler(req, res) {
         messages: [
           {
             role: 'user',
-            content: `Write the read for this data:\n\n${JSON.stringify(data, null, 2)}`,
+            content: `Write the read for this data:\n\n${JSON.stringify(data, null, 2)}${
+              movingAverages ? `\n\nMoving averages:\n${JSON.stringify(movingAverages, null, 2)}` : ''
+            }`,
           },
         ],
       }),
