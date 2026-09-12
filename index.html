@@ -89,12 +89,17 @@
 
 <div class="status" id="status"></div>
 <div id="maInfoBox" style="display:none; font-size:12.5px; color:#999; margin-bottom:4px;"></div>
+<div id="vpInfoBox" style="display:none; font-size:12.5px; color:#999; margin-bottom:12px;"></div>
 
 <div id="chartWrap" style="height: 0;">
   <canvas id="gexChart" role="img" aria-label="GEX by strike"></canvas>
 </div>
 
 <div id="analysisBox" style="display:none; margin-top:16px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+
+<div id="vpChartWrap" style="position:relative; width:100%; height:0; margin-top:16px;">
+  <canvas id="vpChart" role="img" aria-label="Volume profile by price"></canvas>
+</div>
 
 <div class="history">
   <h2>History</h2>
@@ -121,6 +126,7 @@ const PARSE_ENDPOINT = '/api/parse-gex'; // adjust if hosted elsewhere
 const ANALYZE_ENDPOINT = '/api/analyze-gex';
 const WEEKLY_ENDPOINT = '/api/analyze-weekly';
 const MA_ENDPOINT = '/api/get-ma';
+const VOLUME_PROFILE_ENDPOINT = '/api/get-volume-profile';
 const fileInput = document.getElementById('fileInput');
 const dropZone = document.getElementById('dropZone');
 const dropZoneLabel = document.getElementById('dropZoneLabel');
@@ -132,6 +138,8 @@ const chartWrap = document.getElementById('chartWrap');
 const historyList = document.getElementById('historyList');
 const analysisBox = document.getElementById('analysisBox');
 const maInfoBox = document.getElementById('maInfoBox');
+const vpInfoBox = document.getElementById('vpInfoBox');
+const vpChartWrap = document.getElementById('vpChartWrap');
 const tickerFilter = document.getElementById('tickerFilter');
 const weeklyBtn = document.getElementById('weeklyBtn');
 const weeklyBox = document.getElementById('weeklyBox');
@@ -145,6 +153,7 @@ let weeklyChartInstance = null;
 let currentData = null;
 let currentAnalysis = null;
 let currentWeekly = null;
+let vpChartInstance = null;
 
 function showMaInfo(ma) {
   if (!ma || (ma.ma30 == null && ma.ma200 == null)) {
@@ -157,6 +166,71 @@ function showMaInfo(ma) {
   else parts.push('200MA: not enough history');
   maInfoBox.textContent = parts.join('  ·  ');
   maInfoBox.style.display = 'block';
+}
+
+function showVolumeProfileInfo(vp) {
+  if (!vp || vp.poc == null) {
+    vpInfoBox.style.display = 'none';
+    return;
+  }
+  vpInfoBox.textContent = `POC: $${vp.poc}  ·  Value area: $${vp.value_area_low}–$${vp.value_area_high}  (last ${vp.lookback_days}d)`;
+  vpInfoBox.style.display = 'block';
+}
+
+function renderVolumeProfileChart(vp, gexData) {
+  if (!vp || !vp.buckets || !vp.buckets.length) {
+    vpChartWrap.style.height = '0';
+    return;
+  }
+
+  // Sort buckets high-to-low to match the GEX chart's strike ordering above.
+  const sorted = [...vp.buckets].sort((a, b) => b.price_low - a.price_low);
+  const labels = sorted.map((b) => `$${b.price_low.toFixed(1)}`);
+  const values = sorted.map((b) => b.volume);
+  const colors = sorted.map((b) => {
+    const mid = (b.price_low + b.price_high) / 2;
+    if (Math.abs(mid - vp.poc) < (b.price_high - b.price_low)) return '#3b82f6'; // POC bucket
+    if (mid >= vp.value_area_low && mid <= vp.value_area_high) return '#5b6b8c'; // value area
+    return '#333a4d'; // outside value area
+  });
+
+  vpChartWrap.style.height = Math.max(280, sorted.length * 12 + 60) + 'px';
+
+  if (vpChartInstance) vpChartInstance.destroy();
+
+  vpChartInstance = new Chart(document.getElementById('vpChart'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{ data: values, backgroundColor: colors, borderRadius: 2, barThickness: 8 }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        title: {
+          display: true,
+          text: `${vp.symbol} volume profile · POC $${vp.poc} · last ${vp.lookback_days}d`,
+          color: '#ccc',
+          font: { size: 12, weight: 'normal' },
+        },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => `${ctx.raw.toLocaleString()} vol`,
+          },
+        },
+      },
+      scales: {
+        x: { grid: { color: 'rgba(150,150,150,0.15)' }, ticks: { color: '#999' } },
+        y: {
+          grid: { display: false },
+          ticks: { color: '#999', autoSkip: true, maxTicksLimit: 20 },
+        },
+      },
+    },
+  });
 }
 
 function setSelectedFile(file) {
@@ -222,6 +296,8 @@ async function parseAndVisualize() {
   if (!selectedFile) return;
   parseBtn.disabled = true;
   maInfoBox.style.display = 'none';
+  vpInfoBox.style.display = 'none';
+  vpChartWrap.style.height = '0';
   setStatus('Reading image...');
 
   try {
@@ -262,12 +338,38 @@ async function parseAndVisualize() {
       maInfoBox.style.display = 'none';
     }
 
+    let volumeProfileSummary = null;
+    try {
+      const vpRes = await fetch(`${VOLUME_PROFILE_ENDPOINT}?symbol=${encodeURIComponent(data.ticker)}`);
+      if (vpRes.ok) {
+        const vp = await vpRes.json();
+        // Send only the summary to the analysis call, not the full bucket
+        // list, to keep the request small - the chart uses the full data.
+        volumeProfileSummary = {
+          symbol: vp.symbol,
+          lookback_days: vp.lookback_days,
+          poc: vp.poc,
+          value_area_low: vp.value_area_low,
+          value_area_high: vp.value_area_high,
+        };
+        data.volumeProfile = vp;
+        showVolumeProfileInfo(vp);
+        renderVolumeProfileChart(vp, data);
+      } else {
+        vpInfoBox.style.display = 'none';
+        vpChartWrap.style.height = '0';
+      }
+    } catch (e) {
+      vpInfoBox.style.display = 'none';
+      vpChartWrap.style.height = '0';
+    }
+
     setStatus('Writing analysis...');
 
     const analysisRes = await fetch(ANALYZE_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data, movingAverages }),
+      body: JSON.stringify({ data, movingAverages, volumeProfile: volumeProfileSummary }),
     });
 
     if (analysisRes.ok) {
@@ -313,7 +415,9 @@ async function downloadPdf() {
     doc.setTextColor(100);
     const ma = currentData.movingAverages;
     const maStr = ma ? ` · 30MA $${ma.ma30 ?? '—'} / 200MA ${ma.ma200 ?? 'n/a'}` : '';
-    const meta = `Spot $${currentData.spot_price} · Expiration ${currentData.expiration} · ${currentData.read_type} read · ${new Date(currentData.captured_at).toLocaleString()}${maStr}`;
+    const vp = currentData.volumeProfile;
+    const vpStr = vp ? ` · POC $${vp.poc} (VA $${vp.value_area_low}–$${vp.value_area_high})` : '';
+    const meta = `Spot $${currentData.spot_price} · Expiration ${currentData.expiration} · ${currentData.read_type} read · ${new Date(currentData.captured_at).toLocaleString()}${maStr}${vpStr}`;
     doc.text(meta, margin, y);
     y += 24;
     doc.setTextColor(0);
@@ -325,6 +429,19 @@ async function downloadPdf() {
     const imgHeight = (canvas.height / canvas.width) * imgWidth;
     doc.addImage(imgData, 'PNG', margin, y, imgWidth, imgHeight);
     y += imgHeight + 24;
+
+    // Volume profile chart, if one was rendered for this snapshot.
+    if (vpChartInstance && vpChartWrap.style.height !== '0px' && vpChartWrap.style.height !== '0') {
+      const vpCanvas = document.getElementById('vpChart');
+      const vpImgData = vpCanvas.toDataURL('image/png', 1.0);
+      const vpImgHeight = (vpCanvas.height / vpCanvas.width) * imgWidth;
+      if (y + vpImgHeight > doc.internal.pageSize.getHeight() - margin) {
+        doc.addPage();
+        y = margin;
+      }
+      doc.addImage(vpImgData, 'PNG', margin, y, imgWidth, vpImgHeight);
+      y += vpImgHeight + 24;
+    }
 
     if (currentAnalysis) {
       doc.setFontSize(12);
@@ -444,6 +561,13 @@ function renderHistory() {
       currentAnalysis = item.analysis || null;
       renderChart(item);
       showMaInfo(item.movingAverages);
+      if (item.volumeProfile) {
+        showVolumeProfileInfo(item.volumeProfile);
+        renderVolumeProfileChart(item.volumeProfile, item);
+      } else {
+        vpInfoBox.style.display = 'none';
+        vpChartWrap.style.height = '0';
+      }
       if (currentAnalysis) {
         analysisBox.textContent = currentAnalysis;
         analysisBox.style.display = 'block';
