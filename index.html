@@ -132,6 +132,7 @@
 <div class="controls" style="margin-top:12px;">
   <select id="flowTickerFilter"><option value="">All tickers</option></select>
   <button id="flowWeeklyBtn" disabled>Generate weekly flow read</button>
+  <button id="flowMonthlyBtn" disabled>Generate monthly flow read</button>
 </div>
 <div id="flowHistoryList"></div>
 
@@ -144,6 +145,15 @@
   <button id="flowWeeklyPdfBtn" style="margin-top:12px;">Download weekly flow PDF</button>
 </div>
 
+<div id="flowMonthlyBox" style="display:none; margin-top:16px;">
+  <h2 style="font-size:15px; color:#aaa;">Monthly flow read</h2>
+  <div id="flowMonthlyAnalysisText" style="padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+  <div id="flowMonthlyChartWrap" style="position:relative; height:0; margin-top:16px;">
+    <canvas id="flowMonthlyChart"></canvas>
+  </div>
+  <button id="flowMonthlyPdfBtn" style="margin-top:12px;">Download monthly flow PDF</button>
+</div>
+
 <hr style="border:none; border-top:1px solid #222; margin:32px 0 20px;" />
 
 <div class="history">
@@ -151,6 +161,7 @@
   <div class="controls" style="margin-top:0;">
     <select id="tickerFilter"><option value="">All tickers</option></select>
     <button id="weeklyBtn" disabled>Generate weekly read</button>
+    <button id="monthlyBtn" disabled>Generate monthly read</button>
   </div>
   <div id="historyList"></div>
 </div>
@@ -162,6 +173,15 @@
     <canvas id="weeklyChart"></canvas>
   </div>
   <button id="weeklyPdfBtn" style="margin-top:12px;">Download weekly PDF</button>
+</div>
+
+<div id="monthlyBox" style="display:none; margin-top:16px;">
+  <h2 style="font-size:15px; color:#aaa;">Monthly read</h2>
+  <div id="monthlyAnalysisText" style="padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+  <div id="monthlyChartWrap" style="position:relative; height:0; margin-top:16px;">
+    <canvas id="monthlyChart"></canvas>
+  </div>
+  <button id="monthlyPdfBtn" style="margin-top:12px;">Download monthly PDF</button>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
@@ -191,13 +211,20 @@ const weeklyBox = document.getElementById('weeklyBox');
 const weeklyAnalysisText = document.getElementById('weeklyAnalysisText');
 const weeklyChartWrap = document.getElementById('weeklyChartWrap');
 const weeklyPdfBtn = document.getElementById('weeklyPdfBtn');
+const monthlyBtn = document.getElementById('monthlyBtn');
+const monthlyBox = document.getElementById('monthlyBox');
+const monthlyAnalysisText = document.getElementById('monthlyAnalysisText');
+const monthlyChartWrap = document.getElementById('monthlyChartWrap');
+const monthlyPdfBtn = document.getElementById('monthlyPdfBtn');
 
 let selectedFile = null;
 let chartInstance = null;
 let weeklyChartInstance = null;
+let monthlyChartInstance = null;
 let currentData = null;
 let currentAnalysis = null;
 let currentWeekly = null;
+let currentMonthly = null;
 let vpChartInstance = null;
 
 function showMaInfo(ma) {
@@ -633,6 +660,12 @@ function updateWeeklyButtonState() {
   weeklyBtn.textContent = eligible.length < 2
     ? 'Generate weekly read (need 2+ same-ticker snapshots)'
     : `Generate weekly read (${eligible.length} snapshots)`;
+
+  const monthlyEligible = getEligibleSnapshotsForMonthly();
+  monthlyBtn.disabled = monthlyEligible.length < 5;
+  monthlyBtn.textContent = monthlyEligible.length < 5
+    ? 'Generate monthly read (need 5+ same-ticker snapshots)'
+    : `Generate monthly read (${monthlyEligible.length} snapshots)`;
 }
 
 function getEligibleSnapshotsForWeekly() {
@@ -650,6 +683,154 @@ function getEligibleSnapshotsForWeekly() {
     .filter((s) => s.expiration === mostCommonExp)
     .sort((a, b) => new Date(a.captured_at) - new Date(b.captured_at))
     .slice(-7);
+}
+
+function getEligibleSnapshotsForMonthly() {
+  const existing = JSON.parse(localStorage.getItem('gex_history') || '[]');
+  const ticker = tickerFilter.value;
+  if (!ticker) return [];
+  // Same ticker only - NOT locked to one expiration, since a month
+  // naturally spans several weekly/monthly expiration cycles. Most
+  // recent 22 snapshots (~ a trading month).
+  return existing
+    .filter((s) => s.ticker === ticker)
+    .sort((a, b) => new Date(a.captured_at) - new Date(b.captured_at))
+    .slice(-22);
+}
+
+async function generateMonthlyRead() {
+  const snapshots = getEligibleSnapshotsForMonthly();
+  if (snapshots.length < 5) return;
+
+  monthlyBtn.disabled = true;
+  setStatus('Building monthly regime read...');
+
+  try {
+    const res = await fetch('/api/analyze-monthly', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ snapshots }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Request failed (${res.status})`);
+    }
+
+    const data = await res.json();
+    currentMonthly = data;
+    monthlyAnalysisText.textContent = data.analysis;
+    renderMonthlyChart(data);
+    monthlyBox.style.display = 'block';
+    setStatus(`Monthly read generated from ${data.snapshot_count} snapshots.`);
+  } catch (err) {
+    setStatus(err.message, true);
+  } finally {
+    updateWeeklyButtonState();
+  }
+}
+
+function renderMonthlyChart(data) {
+  const labels = data.flip_zone_trend.map((d) => new Date(d.captured_at).toLocaleDateString());
+  const spotData = data.flip_zone_trend.map((d) => d.spot_price);
+  const flipData = data.flip_zone_trend.map((d) => d.flip_zone);
+
+  monthlyChartWrap.style.height = '280px';
+
+  if (monthlyChartInstance) monthlyChartInstance.destroy();
+
+  monthlyChartInstance = new Chart(document.getElementById('monthlyChart'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Spot price', data: spotData, borderColor: '#3b82f6', backgroundColor: 'transparent', tension: 0.15, pointRadius: 3 },
+        { label: 'Flip zone strike', data: flipData, borderColor: '#eda100', backgroundColor: 'transparent', tension: 0.15, pointRadius: 3, spanGaps: true },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: true, labels: { color: '#999', font: { size: 10 } } },
+        title: {
+          display: true,
+          text: `${data.ticker} spot vs flip zone over ${data.snapshot_count} sessions`,
+          color: '#ccc',
+          font: { size: 12, weight: 'normal' },
+        },
+      },
+      scales: {
+        y: { grid: { color: 'rgba(150,150,150,0.15)' }, ticks: { color: '#999' } },
+        x: { grid: { display: false }, ticks: { color: '#999', maxTicksLimit: 10 } },
+      },
+    },
+  });
+}
+
+async function downloadMonthlyPdf() {
+  if (!currentMonthly) return;
+  monthlyPdfBtn.disabled = true;
+
+  try {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const margin = 48;
+    let y = margin;
+
+    doc.setFontSize(16);
+    doc.setFont(undefined, 'bold');
+    doc.text(`${currentMonthly.ticker} Monthly GEX Read`, margin, y);
+    y += 20;
+
+    doc.setFontSize(10);
+    doc.setFont(undefined, 'normal');
+    doc.setTextColor(100);
+    const [from, to] = currentMonthly.date_range;
+    doc.text(
+      `${currentMonthly.snapshot_count} sessions · ${new Date(from).toLocaleDateString()} to ${new Date(to).toLocaleDateString()}`,
+      margin, y
+    );
+    y += 24;
+    doc.setTextColor(0);
+
+    const canvas = document.getElementById('monthlyChart');
+    const imgData = canvas.toDataURL('image/png', 1.0);
+    const imgWidth = pageWidth - margin * 2;
+    const imgHeight = (canvas.height / canvas.width) * imgWidth;
+    doc.addImage(imgData, 'PNG', margin, y, imgWidth, imgHeight);
+    y += imgHeight + 24;
+
+    doc.setFontSize(12);
+    doc.setFont(undefined, 'bold');
+    doc.text('Monthly Analysis', margin, y);
+    y += 16;
+
+    doc.setFontSize(10.5);
+    doc.setFont(undefined, 'normal');
+    const lines = doc.splitTextToSize(currentMonthly.analysis, pageWidth - margin * 2);
+    lines.forEach((line) => {
+      if (y > doc.internal.pageSize.getHeight() - margin) {
+        doc.addPage();
+        y = margin;
+      }
+      doc.text(line, margin, y);
+      y += 14;
+    });
+
+    doc.setFontSize(8);
+    doc.setTextColor(150);
+    doc.text(
+      'Generated from manually captured screenshots. Not financial advice.',
+      margin,
+      doc.internal.pageSize.getHeight() - 24
+    );
+
+    doc.save(`${currentMonthly.ticker}_Monthly_GEX.pdf`);
+  } finally {
+    monthlyPdfBtn.disabled = false;
+  }
 }
 
 async function generateWeeklyRead() {
@@ -802,9 +983,11 @@ async function downloadWeeklyPdf() {
   }
 }
 
-tickerFilter.addEventListener('change', () => { renderHistory(); weeklyBox.style.display = 'none'; });
+tickerFilter.addEventListener('change', () => { renderHistory(); weeklyBox.style.display = 'none'; monthlyBox.style.display = 'none'; });
 weeklyBtn.addEventListener('click', generateWeeklyRead);
 weeklyPdfBtn.addEventListener('click', downloadWeeklyPdf);
+monthlyBtn.addEventListener('click', generateMonthlyRead);
+monthlyPdfBtn.addEventListener('click', downloadMonthlyPdf);
 
 parseBtn.addEventListener('click', parseAndVisualize);
 pdfBtn.addEventListener('click', downloadPdf);
@@ -1151,9 +1334,16 @@ const flowWeeklyBox = document.getElementById('flowWeeklyBox');
 const flowWeeklyAnalysisText = document.getElementById('flowWeeklyAnalysisText');
 const flowWeeklyChartWrap = document.getElementById('flowWeeklyChartWrap');
 const flowWeeklyPdfBtn = document.getElementById('flowWeeklyPdfBtn');
+const flowMonthlyBtn = document.getElementById('flowMonthlyBtn');
+const flowMonthlyBox = document.getElementById('flowMonthlyBox');
+const flowMonthlyAnalysisText = document.getElementById('flowMonthlyAnalysisText');
+const flowMonthlyChartWrap = document.getElementById('flowMonthlyChartWrap');
+const flowMonthlyPdfBtn = document.getElementById('flowMonthlyPdfBtn');
 
 let currentFlowWeekly = null;
 let flowWeeklyChartInstance = null;
+let currentFlowMonthly = null;
+let flowMonthlyChartInstance = null;
 
 function saveFlowToHistory(stats, analysis) {
   const key = 'flow_history';
@@ -1207,6 +1397,12 @@ function updateFlowWeeklyButtonState() {
   flowWeeklyBtn.textContent = eligible.length < 2
     ? 'Generate weekly flow read (need 2+ same-ticker days)'
     : `Generate weekly flow read (${eligible.length} days)`;
+
+  const monthlyEligible = getEligibleFlowSnapshotsForMonthly();
+  flowMonthlyBtn.disabled = monthlyEligible.length < 5;
+  flowMonthlyBtn.textContent = monthlyEligible.length < 5
+    ? 'Generate monthly flow read (need 5+ same-ticker days)'
+    : `Generate monthly flow read (${monthlyEligible.length} days)`;
 }
 
 function getEligibleFlowSnapshotsForWeekly() {
@@ -1217,6 +1413,156 @@ function getEligibleFlowSnapshotsForWeekly() {
     .filter((s) => s.ticker === ticker)
     .sort((a, b) => new Date(a.captured_at) - new Date(b.captured_at))
     .slice(-7);
+}
+
+function getEligibleFlowSnapshotsForMonthly() {
+  const existing = JSON.parse(localStorage.getItem('flow_history') || '[]');
+  const ticker = flowTickerFilter.value;
+  if (!ticker) return [];
+  return existing
+    .filter((s) => s.ticker === ticker)
+    .sort((a, b) => new Date(a.captured_at) - new Date(b.captured_at))
+    .slice(-22);
+}
+
+async function generateMonthlyFlowRead() {
+  const snapshots = getEligibleFlowSnapshotsForMonthly();
+  if (snapshots.length < 5) return;
+
+  flowMonthlyBtn.disabled = true;
+  setFlowStatus('Building monthly flow regime read...');
+
+  try {
+    const res = await fetch('/api/analyze-flow-monthly', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ snapshots }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Request failed (${res.status})`);
+    }
+
+    const data = await res.json();
+    currentFlowMonthly = data;
+    flowMonthlyAnalysisText.textContent = data.analysis;
+    renderFlowMonthlyChart(data);
+    flowMonthlyBox.style.display = 'block';
+    setFlowStatus(`Monthly flow read generated from ${data.snapshot_count} days.`);
+  } catch (err) {
+    setFlowStatus(err.message, true);
+  } finally {
+    updateFlowWeeklyButtonState();
+  }
+}
+
+function renderFlowMonthlyChart(data) {
+  const labels = data.put_call_trend.map((d) => new Date(d.captured_at).toLocaleDateString());
+  const values = data.put_call_trend.map((d) => d.put_call_ratio_pct);
+
+  flowMonthlyChartWrap.style.height = '280px';
+
+  if (flowMonthlyChartInstance) flowMonthlyChartInstance.destroy();
+
+  flowMonthlyChartInstance = new Chart(document.getElementById('flowMonthlyChart'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Put % of total premium',
+        data: values,
+        borderColor: '#e66767',
+        backgroundColor: 'rgba(230,103,103,0.1)',
+        fill: true,
+        tension: 0.15,
+        pointRadius: 3,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        title: {
+          display: true,
+          text: `${data.ticker} put % trend over ${data.snapshot_count} days`,
+          color: '#ccc',
+          font: { size: 12, weight: 'normal' },
+        },
+        tooltip: { callbacks: { label: (ctx) => `${ctx.raw.toFixed(1)}% puts` } },
+      },
+      scales: {
+        y: { min: 0, max: 100, grid: { color: 'rgba(150,150,150,0.15)' }, ticks: { color: '#999' } },
+        x: { grid: { display: false }, ticks: { color: '#999', maxTicksLimit: 10 } },
+      },
+    },
+  });
+}
+
+async function downloadMonthlyFlowPdf() {
+  if (!currentFlowMonthly) return;
+  flowMonthlyPdfBtn.disabled = true;
+
+  try {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const margin = 48;
+    let y = margin;
+
+    doc.setFontSize(16);
+    doc.setFont(undefined, 'bold');
+    doc.text(`${currentFlowMonthly.ticker} Monthly Flow Read`, margin, y);
+    y += 20;
+
+    doc.setFontSize(10);
+    doc.setFont(undefined, 'normal');
+    doc.setTextColor(100);
+    const [from, to] = currentFlowMonthly.date_range;
+    doc.text(
+      `${currentFlowMonthly.snapshot_count} days · ${new Date(from).toLocaleDateString()} to ${new Date(to).toLocaleDateString()}`,
+      margin, y
+    );
+    y += 24;
+    doc.setTextColor(0);
+
+    const canvas = document.getElementById('flowMonthlyChart');
+    const imgData = canvas.toDataURL('image/png', 1.0);
+    const imgWidth = pageWidth - margin * 2;
+    const imgHeight = (canvas.height / canvas.width) * imgWidth;
+    doc.addImage(imgData, 'PNG', margin, y, imgWidth, imgHeight);
+    y += imgHeight + 24;
+
+    doc.setFontSize(12);
+    doc.setFont(undefined, 'bold');
+    doc.text('Monthly Flow Analysis', margin, y);
+    y += 16;
+
+    doc.setFontSize(10.5);
+    doc.setFont(undefined, 'normal');
+    const lines = doc.splitTextToSize(currentFlowMonthly.analysis, pageWidth - margin * 2);
+    lines.forEach((line) => {
+      if (y > doc.internal.pageSize.getHeight() - margin) {
+        doc.addPage();
+        y = margin;
+      }
+      doc.text(line, margin, y);
+      y += 14;
+    });
+
+    doc.setFontSize(8);
+    doc.setTextColor(150);
+    doc.text(
+      'Generated from manually exported flow CSVs. Not financial advice.',
+      margin,
+      doc.internal.pageSize.getHeight() - 24
+    );
+
+    doc.save(`${currentFlowMonthly.ticker}_Monthly_Flow.pdf`);
+  } finally {
+    flowMonthlyPdfBtn.disabled = false;
+  }
 }
 
 async function generateWeeklyFlowRead() {
@@ -1359,9 +1705,11 @@ async function downloadWeeklyFlowPdf() {
   }
 }
 
-flowTickerFilter.addEventListener('change', () => { renderFlowHistory(); flowWeeklyBox.style.display = 'none'; });
+flowTickerFilter.addEventListener('change', () => { renderFlowHistory(); flowWeeklyBox.style.display = 'none'; flowMonthlyBox.style.display = 'none'; });
 flowWeeklyBtn.addEventListener('click', generateWeeklyFlowRead);
 flowWeeklyPdfBtn.addEventListener('click', downloadWeeklyFlowPdf);
+flowMonthlyBtn.addEventListener('click', generateMonthlyFlowRead);
+flowMonthlyPdfBtn.addEventListener('click', downloadMonthlyFlowPdf);
 
 renderHistory();
 renderFlowHistory();
