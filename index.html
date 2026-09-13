@@ -502,19 +502,28 @@ async function processGexData(data) {
 
   setStatus('Writing analysis...');
 
-  const analysisRes = await fetch(ANALYZE_ENDPOINT, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ data, movingAverages, volumeProfile: volumeProfileSummary }),
-  });
+  let analysisError = null;
+  try {
+    const analysisRes = await fetch(ANALYZE_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data, movingAverages, volumeProfile: volumeProfileSummary }),
+    });
 
-  if (analysisRes.ok) {
-    const { analysis } = await analysisRes.json();
-    currentAnalysis = analysis;
-    data.analysis = analysis;
-    analysisBox.textContent = analysis;
-    analysisBox.style.display = 'block';
-  } else {
+    if (analysisRes.ok) {
+      const { analysis } = await analysisRes.json();
+      currentAnalysis = analysis;
+      data.analysis = analysis;
+      analysisBox.textContent = analysis;
+      analysisBox.style.display = 'block';
+    } else {
+      const err = await analysisRes.json().catch(() => ({}));
+      analysisError = err.error || `Analysis request failed (${analysisRes.status})`;
+      currentAnalysis = null;
+      analysisBox.style.display = 'none';
+    }
+  } catch (e) {
+    analysisError = e.message;
     currentAnalysis = null;
     analysisBox.style.display = 'none';
   }
@@ -522,7 +531,11 @@ async function processGexData(data) {
   saveToHistory(data);
   pdfBtn.disabled = false;
   const source = data.source === 'tiger' ? ' (Tiger live)' : '';
-  setStatus(`Parsed ${data.ticker} — ${data.expiration} (${data.levels.length} strikes)${source}`);
+  if (analysisError) {
+    setStatus(`Parsed ${data.ticker} — ${data.expiration} (${data.levels.length} strikes)${source}. Analysis failed: ${analysisError}`, true);
+  } else {
+    setStatus(`Parsed ${data.ticker} — ${data.expiration} (${data.levels.length} strikes)${source}`);
+  }
 }
 
 async function downloadPdf() {
