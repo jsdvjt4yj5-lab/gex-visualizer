@@ -22,7 +22,7 @@
     margin: 16px 0;
   }
   input[type="file"] { color: #eee; }
-  #dropZone {
+  #dropZone, #flowDropZone {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -32,11 +32,11 @@
     padding: 14px;
     transition: border-color 0.15s, background 0.15s;
   }
-  #dropZone.drag-over {
+  #dropZone.drag-over, #flowDropZone.drag-over {
     border-color: #199e70;
     background: rgba(25, 158, 112, 0.08);
   }
-  #dropZoneLabel {
+  #dropZoneLabel, #flowDropZoneLabel {
     font-size: 12.5px;
     color: #777;
   }
@@ -100,6 +100,36 @@
 <div id="vpChartWrap" style="position:relative; width:100%; height:0; margin-top:16px;">
   <canvas id="vpChart" role="img" aria-label="Volume profile by price"></canvas>
 </div>
+
+<hr style="border:none; border-top:1px solid #222; margin:32px 0 20px;" />
+
+<h2 style="font-size:15px; color:#aaa;">EOD Flow Analysis</h2>
+<p style="font-size:13px; color:#999; margin-top:4px;">
+  Upload a Bullflow flow export CSV (Collections export) after market close
+  to see put/call skew, aggression, and conviction clusters for the day.
+</p>
+
+<div id="flowDropZone">
+  <input type="file" id="flowFileInput" accept=".csv" />
+  <span id="flowDropZoneLabel">or drag and drop the CSV here</span>
+</div>
+
+<div class="controls">
+  <button id="flowParseBtn" disabled>Analyze flow</button>
+  <button id="flowPdfBtn" disabled>Download PDF</button>
+</div>
+
+<div class="status" id="flowStatus"></div>
+
+<div id="flowSummaryBox" style="display:none; font-size:12.5px; color:#999; margin-bottom:8px;"></div>
+
+<div id="flowChartWrap" style="position:relative; width:100%; height:0; margin-top:8px;">
+  <canvas id="flowChart" role="img" aria-label="Premium by strike"></canvas>
+</div>
+
+<div id="flowAnalysisBox" style="display:none; margin-top:16px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+
+<hr style="border:none; border-top:1px solid #222; margin:32px 0 20px;" />
 
 <div class="history">
   <h2>History</h2>
@@ -763,6 +793,339 @@ weeklyPdfBtn.addEventListener('click', downloadWeeklyPdf);
 
 parseBtn.addEventListener('click', parseAndVisualize);
 pdfBtn.addEventListener('click', downloadPdf);
+
+// ---------- EOD Flow Analysis ----------
+
+const flowFileInput = document.getElementById('flowFileInput');
+const flowDropZone = document.getElementById('flowDropZone');
+const flowDropZoneLabel = document.getElementById('flowDropZoneLabel');
+const flowParseBtn = document.getElementById('flowParseBtn');
+const flowPdfBtn = document.getElementById('flowPdfBtn');
+const flowStatusEl = document.getElementById('flowStatus');
+const flowSummaryBox = document.getElementById('flowSummaryBox');
+const flowChartWrap = document.getElementById('flowChartWrap');
+const flowAnalysisBox = document.getElementById('flowAnalysisBox');
+
+let selectedFlowFile = null;
+let currentFlowStats = null;
+let currentFlowAnalysis = null;
+let flowChartInstance = null;
+
+function setFlowStatus(msg, isError = false) {
+  flowStatusEl.textContent = msg;
+  flowStatusEl.className = 'status' + (isError ? ' error' : '');
+}
+
+function setSelectedFlowFile(file) {
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith('.csv')) {
+    setFlowStatus('Please provide a .csv file.', true);
+    return;
+  }
+  selectedFlowFile = file;
+  flowParseBtn.disabled = false;
+  flowDropZoneLabel.textContent = file.name;
+  setFlowStatus('');
+}
+
+flowFileInput.addEventListener('change', (e) => {
+  setSelectedFlowFile(e.target.files[0] || null);
+});
+
+['dragenter', 'dragover'].forEach((evt) => {
+  flowDropZone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    flowDropZone.classList.add('drag-over');
+  });
+});
+['dragleave', 'dragend'].forEach((evt) => {
+  flowDropZone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    flowDropZone.classList.remove('drag-over');
+  });
+});
+flowDropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  flowDropZone.classList.remove('drag-over');
+  const file = e.dataTransfer.files && e.dataTransfer.files[0];
+  setSelectedFlowFile(file);
+});
+
+// Minimal CSV parser - handles the flat, unquoted-field format of the
+// Bullflow Collections export. Not a general-purpose CSV parser.
+function parseFlowCsv(text) {
+  const lines = text.trim().split('\n');
+  const headers = lines[0].split(',').map((h) => h.trim());
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    const cells = lines[i].split(',');
+    const row = {};
+    headers.forEach((h, idx) => { row[h] = (cells[idx] || '').trim(); });
+    rows.push(row);
+  }
+  return rows;
+}
+
+function computeFlowStats(rows) {
+  const num = (v) => {
+    const n = parseFloat(v);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  let callPremium = 0, putPremium = 0;
+  let sweepPremium = 0, blockPremium = 0;
+  let aggBuyPremium = 0, aggSellPremium = 0, midPremium = 0;
+  const clusters = {}; // key: strike|expiration|optionType
+
+  rows.forEach((r) => {
+    const premium = num(r.premium) || 0;
+    if (r.optionType === 'C') callPremium += premium;
+    if (r.optionType === 'P') putPremium += premium;
+
+    if (r.tradeType === 'SWEEP') sweepPremium += premium;
+    if (r.tradeType === 'BLOCK') blockPremium += premium;
+
+    if (r.spreadExecution === 'Ask' || r.spreadExecution === 'Above Ask') aggBuyPremium += premium;
+    else if (r.spreadExecution === 'Bid' || r.spreadExecution === 'Below Bid') aggSellPremium += premium;
+    else midPremium += premium;
+
+    const key = `${r.strikePrice}|${r.expirationDate}|${r.optionType}`;
+    if (!clusters[key]) {
+      clusters[key] = {
+        strike: num(r.strikePrice),
+        expiration: r.expirationDate,
+        optionType: r.optionType,
+        premium: 0,
+        count: 0,
+        maxScore: 0,
+      };
+    }
+    clusters[key].premium += premium;
+    clusters[key].count += 1;
+    const score = num(r.score);
+    if (score !== null && score > clusters[key].maxScore) clusters[key].maxScore = score;
+  });
+
+  const totalPremium = callPremium + putPremium;
+  const spotPrices = rows.map((r) => num(r.spotPrice)).filter((v) => v !== null);
+  const spotPrice = spotPrices.length ? spotPrices[spotPrices.length - 1] : null;
+  const ticker = rows.length ? (rows[0].tickerSymbol || rows[0].Symbol || 'UNKNOWN').split(':')[0] : 'UNKNOWN';
+
+  const topClusters = Object.values(clusters)
+    .filter((c) => c.count >= 2) // repeated trades only - single prints aren't "clusters"
+    .sort((a, b) => b.premium - a.premium)
+    .slice(0, 8);
+
+  // For the chart: top strikes by combined premium (put+call together)
+  const byStrike = {};
+  rows.forEach((r) => {
+    const strike = num(r.strikePrice);
+    if (strike === null) return;
+    if (!byStrike[strike]) byStrike[strike] = { strike, call: 0, put: 0 };
+    const premium = num(r.premium) || 0;
+    if (r.optionType === 'C') byStrike[strike].call += premium;
+    else byStrike[strike].put += premium;
+  });
+  const topStrikes = Object.values(byStrike)
+    .sort((a, b) => (b.call + b.put) - (a.call + a.put))
+    .slice(0, 20)
+    .sort((a, b) => b.strike - a.strike);
+
+  return {
+    ticker,
+    spot_price: spotPrice,
+    trade_count: rows.length,
+    call_premium: Math.round(callPremium),
+    put_premium: Math.round(putPremium),
+    total_premium: Math.round(totalPremium),
+    put_call_ratio_pct: totalPremium ? +(putPremium / totalPremium * 100).toFixed(1) : null,
+    sweep_premium: Math.round(sweepPremium),
+    block_premium: Math.round(blockPremium),
+    aggressive_buy_premium: Math.round(aggBuyPremium),
+    aggressive_sell_premium: Math.round(aggSellPremium),
+    top_clusters: topClusters,
+    top_strikes: topStrikes,
+    captured_at: new Date().toISOString(),
+  };
+}
+
+function showFlowSummary(stats) {
+  flowSummaryBox.textContent =
+    `${stats.ticker} · ${stats.trade_count} trades · Puts ${stats.put_call_ratio_pct}% / Calls ${(100 - stats.put_call_ratio_pct).toFixed(1)}% ` +
+    `· Aggressive buy $${(stats.aggressive_buy_premium / 1e6).toFixed(1)}M vs sell $${(stats.aggressive_sell_premium / 1e6).toFixed(1)}M`;
+  flowSummaryBox.style.display = 'block';
+}
+
+function renderFlowChart(stats) {
+  const labels = stats.top_strikes.map((s) => '$' + s.strike);
+  const callData = stats.top_strikes.map((s) => +(s.call / 1e6).toFixed(2));
+  const putData = stats.top_strikes.map((s) => -+(s.put / 1e6).toFixed(2)); // negative so puts render opposite calls
+
+  flowChartWrap.style.height = Math.max(280, stats.top_strikes.length * 26 + 60) + 'px';
+
+  if (flowChartInstance) flowChartInstance.destroy();
+
+  flowChartInstance = new Chart(document.getElementById('flowChart'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Call premium ($M)', data: callData, backgroundColor: '#199e70', borderRadius: 3, barThickness: 14 },
+        { label: 'Put premium ($M)', data: putData, backgroundColor: '#e66767', borderRadius: 3, barThickness: 14 },
+      ],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: true, labels: { color: '#999', font: { size: 10 } } },
+        title: {
+          display: true,
+          text: `${stats.ticker} premium by strike (today's flow)`,
+          color: '#ccc',
+          font: { size: 12, weight: 'normal' },
+        },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => `${ctx.dataset.label}: $${Math.abs(ctx.raw).toFixed(2)}M`,
+          },
+        },
+      },
+      scales: {
+        x: { grid: { color: 'rgba(150,150,150,0.15)' }, ticks: { color: '#999' } },
+        y: { grid: { display: false }, ticks: { color: '#999' } },
+      },
+    },
+  });
+}
+
+async function parseAndAnalyzeFlow() {
+  if (!selectedFlowFile) return;
+  flowParseBtn.disabled = true;
+  flowSummaryBox.style.display = 'none';
+  flowChartWrap.style.height = '0';
+  flowAnalysisBox.style.display = 'none';
+  setFlowStatus('Reading CSV...');
+
+  try {
+    const text = await selectedFlowFile.text();
+    const rows = parseFlowCsv(text);
+
+    if (!rows.length) {
+      throw new Error('No rows found in this CSV.');
+    }
+
+    setFlowStatus('Computing stats...');
+    const stats = computeFlowStats(rows);
+    currentFlowStats = stats;
+    showFlowSummary(stats);
+    renderFlowChart(stats);
+
+    setFlowStatus('Writing EOD summary...');
+
+    // If today's GEX data for the same ticker is already loaded, pass it
+    // along so the write-up can note confirmation/contradiction.
+    const gexContext = currentData && currentData.ticker === stats.ticker
+      ? { expiration: currentData.expiration, spot_price: currentData.spot_price, levels: currentData.levels }
+      : null;
+
+    const res = await fetch('/api/analyze-flow', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stats, gexContext }),
+    });
+
+    if (res.ok) {
+      const { analysis } = await res.json();
+      currentFlowAnalysis = analysis;
+      flowAnalysisBox.textContent = analysis;
+      flowAnalysisBox.style.display = 'block';
+    } else {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Analysis request failed');
+    }
+
+    flowPdfBtn.disabled = false;
+    setFlowStatus(`Analyzed ${stats.trade_count} trades for ${stats.ticker}.`);
+  } catch (err) {
+    setFlowStatus(err.message, true);
+  } finally {
+    flowParseBtn.disabled = false;
+  }
+}
+
+async function downloadFlowPdf() {
+  if (!currentFlowStats) return;
+  flowPdfBtn.disabled = true;
+
+  try {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const margin = 48;
+    let y = margin;
+
+    doc.setFontSize(16);
+    doc.setFont(undefined, 'bold');
+    doc.text(`${currentFlowStats.ticker} EOD Flow Summary`, margin, y);
+    y += 20;
+
+    doc.setFontSize(10);
+    doc.setFont(undefined, 'normal');
+    doc.setTextColor(100);
+    const meta = `${currentFlowStats.trade_count} trades · Puts ${currentFlowStats.put_call_ratio_pct}% / Calls ${(100 - currentFlowStats.put_call_ratio_pct).toFixed(1)}% · ${new Date(currentFlowStats.captured_at).toLocaleString()}`;
+    doc.text(meta, margin, y);
+    y += 24;
+    doc.setTextColor(0);
+
+    const canvas = document.getElementById('flowChart');
+    const imgData = canvas.toDataURL('image/png', 1.0);
+    const imgWidth = pageWidth - margin * 2;
+    const imgHeight = (canvas.height / canvas.width) * imgWidth;
+    doc.addImage(imgData, 'PNG', margin, y, imgWidth, imgHeight);
+    y += imgHeight + 24;
+
+    if (currentFlowAnalysis) {
+      doc.setFontSize(12);
+      doc.setFont(undefined, 'bold');
+      doc.text('Analysis', margin, y);
+      y += 16;
+
+      doc.setFontSize(10.5);
+      doc.setFont(undefined, 'normal');
+      const lines = doc.splitTextToSize(currentFlowAnalysis, pageWidth - margin * 2);
+      lines.forEach((line) => {
+        if (y > doc.internal.pageSize.getHeight() - margin) {
+          doc.addPage();
+          y = margin;
+        }
+        doc.text(line, margin, y);
+        y += 14;
+      });
+    }
+
+    doc.setFontSize(8);
+    doc.setTextColor(150);
+    doc.text(
+      'Generated from a manually exported flow CSV. Not financial advice.',
+      margin,
+      doc.internal.pageSize.getHeight() - 24
+    );
+
+    doc.save(`${currentFlowStats.ticker}_EOD_Flow_${currentFlowStats.captured_at.slice(0, 10)}.pdf`);
+  } finally {
+    flowPdfBtn.disabled = false;
+  }
+}
+
+flowParseBtn.addEventListener('click', parseAndAnalyzeFlow);
+flowPdfBtn.addEventListener('click', downloadFlowPdf);
+
 renderHistory();
 </script>
 </body>
