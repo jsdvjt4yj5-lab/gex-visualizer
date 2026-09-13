@@ -1,286 +1,1762 @@
-<div id="root"></div>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>GEX Visualizer</title>
 <style>
-  :root {
-    --bg: #faf8f5;
-    --card: #ffffff;
-    --ink: #2b2620;
-    --muted: #8a8075;
-    --line: #ece7de;
-    --accent: #8a5cf6;
-    --accent-soft: #f1ebfd;
-    --claimed: #eef7ee;
-    --claimed-line: #cfe8cf;
-  }
-  * { box-sizing: border-box; }
-  body { background: var(--bg); margin: 0; }
-  #root {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    color: var(--ink);
-    max-width: 640px;
+  body {
+    font-family: -apple-system, Helvetica, Arial, sans-serif;
+    background: #0d0d0d;
+    color: #eee;
+    max-width: 700px;
     margin: 0 auto;
-    padding: 20px 16px 60px;
+    padding: 20px;
   }
-  h1 {
-    font-size: 20px;
-    margin: 4px 0 2px;
-    letter-spacing: -0.01em;
+  h1 { font-size: 20px; font-weight: 600; }
+  .controls {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin: 16px 0;
   }
-  .sub {
-    color: var(--muted);
-    font-size: 13px;
-    margin-bottom: 18px;
-  }
-  .row {
+  input[type="file"] { color: #eee; }
+  #dropZone, #flowDropZone {
     display: flex;
     align-items: center;
     gap: 10px;
-    background: var(--card);
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    padding: 10px 12px;
-    margin-bottom: 8px;
-    transition: background 0.15s, border-color 0.15s;
+    flex-wrap: wrap;
+    border: 1.5px dashed #333;
+    border-radius: 8px;
+    padding: 14px;
+    transition: border-color 0.15s, background 0.15s;
   }
-  .row.claimed {
-    background: var(--claimed);
-    border-color: var(--claimed-line);
+  #dropZone.drag-over, #flowDropZone.drag-over {
+    border-color: #199e70;
+    background: rgba(25, 158, 112, 0.08);
   }
-  .num {
-    width: 24px;
-    flex-shrink: 0;
-    text-align: center;
-    font-size: 12px;
-    color: var(--muted);
-    font-variant-numeric: tabular-nums;
+  #dropZoneLabel, #flowDropZoneLabel {
+    font-size: 12.5px;
+    color: #777;
   }
-  .deck-input {
-    flex: 1.1;
-    min-width: 0;
-    border: none;
-    background: transparent;
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--ink);
-    padding: 6px 4px;
+  select, button {
+    background: #1a1a1a;
+    color: #eee;
+    border: 1px solid #333;
     border-radius: 6px;
-  }
-  .deck-input:hover, .deck-input:focus { background: #f4f1ec; outline: none; }
-  .arrow { color: var(--muted); font-size: 13px; flex-shrink: 0; }
-  .claim-input {
-    flex: 1;
-    min-width: 0;
-    border: 1px dashed var(--line);
-    background: transparent;
+    padding: 8px 12px;
     font-size: 14px;
-    color: var(--ink);
-    padding: 6px 8px;
-    border-radius: 6px;
   }
-  .claim-input::placeholder { color: var(--muted); }
-  .claim-input:hover, .claim-input:focus {
-    border-style: solid;
-    border-color: var(--accent);
-    outline: none;
-    background: var(--accent-soft);
-  }
-  .claim-input.filled {
-    border-style: solid;
-    border-color: var(--claimed-line);
-  }
-  .top-bar {
+  button { cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .status { font-size: 13px; color: #999; margin: 8px 0; min-height: 18px; }
+  .status.error { color: #e66767; }
+  #chartWrap { position: relative; width: 100%; margin-top: 20px; }
+  .history { margin-top: 24px; }
+  .history h2 { font-size: 15px; color: #aaa; }
+  .history-item {
     display: flex;
     justify-content: space-between;
-    align-items: baseline;
-    margin-bottom: 4px;
+    padding: 8px 0;
+    border-bottom: 1px solid #222;
+    font-size: 13px;
+    cursor: pointer;
   }
-  .count {
-    font-size: 12px;
-    color: var(--muted);
-    font-variant-numeric: tabular-nums;
-  }
-  .status {
-    position: fixed;
-    bottom: 14px;
-    left: 50%;
-    transform: translateX(-50%);
-    font-size: 11px;
-    color: var(--muted);
-    background: var(--card);
-    border: 1px solid var(--line);
-    padding: 4px 10px;
-    border-radius: 20px;
-    opacity: 0;
-    transition: opacity 0.3s;
-  }
-  .status.show { opacity: 1; }
+  .history-item:hover { color: #fff; }
 </style>
+</head>
+<body>
 
-<!--
-  ============================================================
-  SETUP REQUIRED — do this once before hosting/sharing this page:
-  1. Go to https://console.firebase.google.com, create a free project.
-  2. In the project, go to "Build > Realtime Database" and click "Create Database"
-     (choose any region, start in "test mode" for now).
-  3. In Database > Rules, set:
-       {
-         "rules": {
-           ".read": true,
-           ".write": true
-         }
-       }
-     This makes the list publicly readable/writable by anyone with the link —
-     which is what you want for a no-login shared list, but it also means
-     anyone with the page URL could technically edit or clear it. Don't put
-     anything sensitive in it.
-  4. Go to Project settings (gear icon) > General > "Your apps" > click the
-     web icon (</>) to register a web app. Copy the firebaseConfig object
-     it gives you and paste it below, replacing the placeholder.
-  5. Host this HTML file somewhere public (GitHub Pages, Netlify, Vercel —
-     all free) and share that URL. It no longer depends on Claude at all.
-  ============================================================
--->
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
-<script type="text/babel">
-const { useState, useEffect, useRef, useCallback } = React;
+<h1>GEX Visualizer</h1>
+<p style="font-size: 13px; color: #999;">
+  Upload a Bullflow GEX screenshot you took manually. Nothing here ever
+  talks to Bullflow directly.
+</p>
 
-// ---- PASTE YOUR FIREBASE CONFIG HERE (see setup instructions above) ----
-const firebaseConfig = {
-  apiKey: "AIzaSyDLZdJY1C9Iu3Gm95UsaQMtOy-UinuVMN0",
-  authDomain: "booster-sharing-68cc4.firebaseapp.com",
-  databaseURL: "https://booster-sharing-68cc4-default-rtdb.asia-southeast1.firebasedatabase.app",
-  projectId: "booster-sharing-68cc4",
-  storageBucket: "booster-sharing-68cc4.firebasestorage.app",
-  messagingSenderId: "226942843477",
-  appId: "1:226942843477:web:bfd861a712e3b359df32dc"
-};
-// --------------------------------------------------------------------
+<div class="controls">
+  <div id="dropZone">
+    <input type="file" id="fileInput" accept="image/*" />
+    <span id="dropZoneLabel">or drag and drop a screenshot here</span>
+  </div>
+  <select id="readType">
+    <option value="daily">Daily read</option>
+    <option value="weekly">Weekly read</option>
+  </select>
+  <button id="parseBtn" disabled>Parse and visualize</button>
+  <button id="pdfBtn" disabled>Download PDF</button>
+</div>
 
-const DECK_NAMES = [
-  "Raz", "Varga", "Welstra", "Zorga", "Blandg", "Alq", "Paul", "Alden",
-  "Lisia", "Liael Odium", "Levi", "Bavs", "Veiss", "Art", "Sephi",
-  "Bheroes", "Berk", "Mag", "Draj", "Liael Drac", "Nana", "Prison",
-  "Norn", "Krys", "Jheeva", "Greedon"
-];
-const DECK_COUNT = DECK_NAMES.length;
+<div class="controls" style="margin-top:0;">
+  <input type="text" id="tigerTickerInput" value="SPY" style="background:#1a1a1a; color:#eee; border:1px solid #333; border-radius:6px; padding:8px 12px; width:80px;" />
+  <button id="tigerPullBtn">Pull from Tiger (experimental)</button>
+</div>
 
-let dbRef = null;
-let configOk = false;
-try {
-  if (firebaseConfig.apiKey !== "YOUR_API_KEY") {
-    firebase.initializeApp(firebaseConfig);
-    dbRef = firebase.database().ref("deck-list-state");
-    configOk = true;
+<div class="status" id="status"></div>
+<div id="maInfoBox" style="display:none; font-size:12.5px; color:#999; margin-bottom:4px;"></div>
+<div id="vpInfoBox" style="display:none; font-size:12.5px; color:#999; margin-bottom:12px;"></div>
+
+<div id="chartWrap" style="height: 0;">
+  <canvas id="gexChart" role="img" aria-label="GEX by strike"></canvas>
+</div>
+
+<div id="analysisBox" style="display:none; margin-top:16px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+
+<div id="vpChartWrap" style="position:relative; width:100%; height:0; margin-top:16px;">
+  <canvas id="vpChart" role="img" aria-label="Volume profile by price"></canvas>
+</div>
+
+<hr style="border:none; border-top:1px solid #222; margin:32px 0 20px;" />
+
+<h2 style="font-size:15px; color:#aaa;">EOD Flow Analysis</h2>
+<p style="font-size:13px; color:#999; margin-top:4px;">
+  Upload a Bullflow flow export CSV (Collections export) after market close
+  to see put/call skew, aggression, and conviction clusters for the day.
+</p>
+
+<div id="flowDropZone">
+  <input type="file" id="flowFileInput" accept=".csv" />
+  <span id="flowDropZoneLabel">or drag and drop the CSV here</span>
+</div>
+
+<div class="controls">
+  <button id="flowParseBtn" disabled>Analyze flow</button>
+  <button id="flowPdfBtn" disabled>Download PDF</button>
+</div>
+
+<div class="status" id="flowStatus"></div>
+
+<div id="flowSummaryBox" style="display:none; font-size:12.5px; color:#999; margin-bottom:8px;"></div>
+
+<div id="flowChartWrap" style="position:relative; width:100%; height:0; margin-top:8px;">
+  <canvas id="flowChart" role="img" aria-label="Premium by strike"></canvas>
+</div>
+
+<div id="flowAnalysisBox" style="display:none; margin-top:16px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+
+<div class="controls" style="margin-top:12px;">
+  <select id="flowTickerFilter"><option value="">All tickers</option></select>
+  <button id="flowWeeklyBtn" disabled>Generate weekly flow read</button>
+  <button id="flowMonthlyBtn" disabled>Generate monthly flow read</button>
+</div>
+<div id="flowHistoryList"></div>
+
+<div id="flowWeeklyBox" style="display:none; margin-top:16px;">
+  <h2 style="font-size:15px; color:#aaa;">Weekly flow read</h2>
+  <div id="flowWeeklyAnalysisText" style="padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+  <div id="flowWeeklyChartWrap" style="position:relative; height:0; margin-top:16px;">
+    <canvas id="flowWeeklyChart"></canvas>
+  </div>
+  <button id="flowWeeklyPdfBtn" style="margin-top:12px;">Download weekly flow PDF</button>
+</div>
+
+<div id="flowMonthlyBox" style="display:none; margin-top:16px;">
+  <h2 style="font-size:15px; color:#aaa;">Monthly flow read</h2>
+  <div id="flowMonthlyAnalysisText" style="padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+  <div id="flowMonthlyChartWrap" style="position:relative; height:0; margin-top:16px;">
+    <canvas id="flowMonthlyChart"></canvas>
+  </div>
+  <button id="flowMonthlyPdfBtn" style="margin-top:12px;">Download monthly flow PDF</button>
+</div>
+
+<hr style="border:none; border-top:1px solid #222; margin:32px 0 20px;" />
+
+<div class="history">
+  <h2>History</h2>
+  <div class="controls" style="margin-top:0;">
+    <select id="tickerFilter"><option value="">All tickers</option></select>
+    <button id="weeklyBtn" disabled>Generate weekly read</button>
+    <button id="monthlyBtn" disabled>Generate monthly read</button>
+  </div>
+  <div id="historyList"></div>
+</div>
+
+<div id="weeklyBox" style="display:none; margin-top:16px;">
+  <h2 style="font-size:15px; color:#aaa;">Weekly read</h2>
+  <div id="weeklyAnalysisText" style="padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+  <div id="weeklyChartWrap" style="position:relative; height:0; margin-top:16px;">
+    <canvas id="weeklyChart"></canvas>
+  </div>
+  <button id="weeklyPdfBtn" style="margin-top:12px;">Download weekly PDF</button>
+</div>
+
+<div id="monthlyBox" style="display:none; margin-top:16px;">
+  <h2 style="font-size:15px; color:#aaa;">Monthly read</h2>
+  <div id="monthlyAnalysisText" style="padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+  <div id="monthlyChartWrap" style="position:relative; height:0; margin-top:16px;">
+    <canvas id="monthlyChart"></canvas>
+  </div>
+  <button id="monthlyPdfBtn" style="margin-top:12px;">Download monthly PDF</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script>
+const PARSE_ENDPOINT = '/api/parse-gex'; // adjust if hosted elsewhere
+const ANALYZE_ENDPOINT = '/api/analyze-gex';
+const WEEKLY_ENDPOINT = '/api/analyze-weekly';
+const MA_ENDPOINT = '/api/get-ma';
+const VOLUME_PROFILE_ENDPOINT = '/api/get-volume-profile';
+const fileInput = document.getElementById('fileInput');
+const dropZone = document.getElementById('dropZone');
+const dropZoneLabel = document.getElementById('dropZoneLabel');
+const parseBtn = document.getElementById('parseBtn');
+const pdfBtn = document.getElementById('pdfBtn');
+const readTypeSelect = document.getElementById('readType');
+const statusEl = document.getElementById('status');
+const chartWrap = document.getElementById('chartWrap');
+const historyList = document.getElementById('historyList');
+const analysisBox = document.getElementById('analysisBox');
+const maInfoBox = document.getElementById('maInfoBox');
+const vpInfoBox = document.getElementById('vpInfoBox');
+const vpChartWrap = document.getElementById('vpChartWrap');
+const tickerFilter = document.getElementById('tickerFilter');
+const weeklyBtn = document.getElementById('weeklyBtn');
+const weeklyBox = document.getElementById('weeklyBox');
+const weeklyAnalysisText = document.getElementById('weeklyAnalysisText');
+const weeklyChartWrap = document.getElementById('weeklyChartWrap');
+const weeklyPdfBtn = document.getElementById('weeklyPdfBtn');
+const monthlyBtn = document.getElementById('monthlyBtn');
+const monthlyBox = document.getElementById('monthlyBox');
+const monthlyAnalysisText = document.getElementById('monthlyAnalysisText');
+const monthlyChartWrap = document.getElementById('monthlyChartWrap');
+const monthlyPdfBtn = document.getElementById('monthlyPdfBtn');
+
+let selectedFile = null;
+let chartInstance = null;
+let weeklyChartInstance = null;
+let monthlyChartInstance = null;
+let currentData = null;
+let currentAnalysis = null;
+let currentWeekly = null;
+let currentMonthly = null;
+let vpChartInstance = null;
+
+function showMaInfo(ma) {
+  if (!ma || (ma.ma30 == null && ma.ma200 == null)) {
+    maInfoBox.style.display = 'none';
+    return;
   }
-} catch (e) {
-  configOk = false;
+  const parts = [];
+  if (ma.ma30 != null) parts.push(`30MA: $${ma.ma30}`);
+  if (ma.ma200 != null) parts.push(`200MA: $${ma.ma200}`);
+  else parts.push('200MA: not enough history');
+  maInfoBox.textContent = parts.join('  ·  ');
+  maInfoBox.style.display = 'block';
 }
 
-function App() {
-  const [decks, setDecks] = useState(
-    Array.from({ length: DECK_COUNT }, (_, i) => ({
-      name: DECK_NAMES[i],
-      claim: ""
-    }))
-  );
-  const [loaded, setLoaded] = useState(false);
-  const [statusMsg, setStatusMsg] = useState("");
-  const saveTimers = useRef({});
-  const isRemoteUpdate = useRef(false);
+function showVolumeProfileInfo(vp) {
+  if (!vp || vp.poc == null) {
+    vpInfoBox.style.display = 'none';
+    return;
+  }
+  vpInfoBox.textContent = `POC: $${vp.poc}  ·  Value area: $${vp.value_area_low}–$${vp.value_area_high}  (last ${vp.lookback_days}d)`;
+  vpInfoBox.style.display = 'block';
+}
 
-  useEffect(() => {
-    if (!configOk) {
-      setLoaded(true);
-      return;
+function renderVolumeProfileChart(vp, gexData) {
+  if (!vp || !vp.buckets || !vp.buckets.length) {
+    vpChartWrap.style.height = '0';
+    return;
+  }
+
+  // Sort buckets high-to-low to match the GEX chart's strike ordering above.
+  const sorted = [...vp.buckets].sort((a, b) => b.price_low - a.price_low);
+  const labels = sorted.map((b) => `$${b.price_low.toFixed(1)}`);
+  const values = sorted.map((b) => b.volume);
+  const colors = sorted.map((b) => {
+    const mid = (b.price_low + b.price_high) / 2;
+    if (Math.abs(mid - vp.poc) < (b.price_high - b.price_low)) return '#3b82f6'; // POC bucket
+    if (mid >= vp.value_area_low && mid <= vp.value_area_high) return '#5b6b8c'; // value area
+    return '#333a4d'; // outside value area
+  });
+
+  vpChartWrap.style.height = Math.max(280, sorted.length * 12 + 60) + 'px';
+
+  if (vpChartInstance) vpChartInstance.destroy();
+
+  vpChartInstance = new Chart(document.getElementById('vpChart'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{ data: values, backgroundColor: colors, borderRadius: 2, barThickness: 8 }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        title: {
+          display: true,
+          text: `${vp.symbol} volume profile · POC $${vp.poc} · last ${vp.lookback_days}d`,
+          color: '#ccc',
+          font: { size: 12, weight: 'normal' },
+        },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => `${ctx.raw.toLocaleString()} vol`,
+          },
+        },
+      },
+      scales: {
+        x: { grid: { color: 'rgba(150,150,150,0.15)' }, ticks: { color: '#999' } },
+        y: {
+          grid: { display: false },
+          ticks: { color: '#999', autoSkip: true, maxTicksLimit: 20 },
+        },
+      },
+    },
+  });
+}
+
+function setSelectedFile(file) {
+  if (!file) return;
+  if (!file.type.startsWith('image/')) {
+    setStatus('Please drop an image file (screenshot).', true);
+    return;
+  }
+  selectedFile = file;
+  parseBtn.disabled = false;
+  dropZoneLabel.textContent = file.name;
+  setStatus('');
+}
+
+fileInput.addEventListener('change', (e) => {
+  setSelectedFile(e.target.files[0] || null);
+});
+
+['dragenter', 'dragover'].forEach((evt) => {
+  dropZone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dropZone.classList.add('drag-over');
+  });
+});
+
+['dragleave', 'dragend'].forEach((evt) => {
+  dropZone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dropZone.classList.remove('drag-over');
+  });
+});
+
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  dropZone.classList.remove('drag-over');
+  const file = e.dataTransfer.files && e.dataTransfer.files[0];
+  setSelectedFile(file);
+});
+
+// Prevent the browser from navigating to the dropped file if it misses the zone.
+['dragover', 'drop'].forEach((evt) => {
+  window.addEventListener(evt, (e) => e.preventDefault());
+});
+
+function setStatus(msg, isError = false) {
+  statusEl.textContent = msg;
+  statusEl.className = 'status' + (isError ? ' error' : '');
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function parseAndVisualize() {
+  if (!selectedFile) return;
+  parseBtn.disabled = true;
+  maInfoBox.style.display = 'none';
+  vpInfoBox.style.display = 'none';
+  vpChartWrap.style.height = '0';
+  setStatus('Reading image...');
+
+  try {
+    const base64 = await fileToBase64(selectedFile);
+    setStatus('Parsing with Claude...');
+
+    const res = await fetch(PARSE_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image: base64,
+        media_type: selectedFile.type || 'image/jpeg',
+        read_type: readTypeSelect.value,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Request failed (${res.status})`);
     }
-    // Live sync: listen for changes from anyone, anytime.
-    dbRef.on("value", (snapshot) => {
-      const val = snapshot.val();
-      if (Array.isArray(val) && val.length === DECK_COUNT) {
-        isRemoteUpdate.current = true;
-        setDecks(val);
+
+    const data = await res.json();
+    await processGexData(data);
+  } catch (err) {
+    setStatus(err.message, true);
+  } finally {
+    parseBtn.disabled = false;
+  }
+}
+
+// Shared downstream pipeline - runs after GEX data is obtained, regardless
+// of source (screenshot parsing OR a live Tiger pull). Fetches MA/volume
+// profile context, generates the written analysis, saves to history.
+async function pullFromTiger() {
+  const symbol = document.getElementById('tigerTickerInput').value.trim().toUpperCase();
+  if (!symbol) return;
+
+  const tigerBtn = document.getElementById('tigerPullBtn');
+  tigerBtn.disabled = true;
+  maInfoBox.style.display = 'none';
+  vpInfoBox.style.display = 'none';
+  vpChartWrap.style.height = '0';
+  setStatus(`Pulling live GEX for ${symbol} from Tiger...`);
+
+  try {
+    const res = await fetch(`/api/get-tiger-gex?symbol=${encodeURIComponent(symbol)}&read_type=${readTypeSelect.value}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Request failed (${res.status})`);
+    }
+    const data = await res.json();
+
+    if (!data.levels || !data.levels.length) {
+      throw new Error('No strikes returned - check the symbol, or try during market hours (gamma/open interest are flat when markets are closed).');
+    }
+
+    await processGexData(data);
+  } catch (err) {
+    setStatus(err.message, true);
+  } finally {
+    tigerBtn.disabled = false;
+  }
+}
+
+document.getElementById('tigerPullBtn').addEventListener('click', pullFromTiger);
+
+async function processGexData(data) {
+  currentData = data;
+  renderChart(data);
+  setStatus('Fetching moving averages...');
+
+  let movingAverages = null;
+  try {
+    const maRes = await fetch(`${MA_ENDPOINT}?symbol=${encodeURIComponent(data.ticker)}`);
+    if (maRes.ok) {
+      movingAverages = await maRes.json();
+      data.movingAverages = movingAverages;
+      showMaInfo(movingAverages);
+    } else {
+      maInfoBox.style.display = 'none';
+    }
+  } catch (e) {
+    maInfoBox.style.display = 'none';
+  }
+
+  let volumeProfileSummary = null;
+  try {
+    const vpRes = await fetch(`${VOLUME_PROFILE_ENDPOINT}?symbol=${encodeURIComponent(data.ticker)}`);
+    if (vpRes.ok) {
+      const vp = await vpRes.json();
+      volumeProfileSummary = {
+        symbol: vp.symbol,
+        lookback_days: vp.lookback_days,
+        poc: vp.poc,
+        value_area_low: vp.value_area_low,
+        value_area_high: vp.value_area_high,
+      };
+      data.volumeProfile = vp;
+      showVolumeProfileInfo(vp);
+      renderVolumeProfileChart(vp, data);
+    } else {
+      vpInfoBox.style.display = 'none';
+      vpChartWrap.style.height = '0';
+    }
+  } catch (e) {
+    vpInfoBox.style.display = 'none';
+    vpChartWrap.style.height = '0';
+  }
+
+  setStatus('Writing analysis...');
+
+  const analysisRes = await fetch(ANALYZE_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data, movingAverages, volumeProfile: volumeProfileSummary }),
+  });
+
+  if (analysisRes.ok) {
+    const { analysis } = await analysisRes.json();
+    currentAnalysis = analysis;
+    data.analysis = analysis;
+    analysisBox.textContent = analysis;
+    analysisBox.style.display = 'block';
+  } else {
+    currentAnalysis = null;
+    analysisBox.style.display = 'none';
+  }
+
+  saveToHistory(data);
+  pdfBtn.disabled = false;
+  const source = data.source === 'tiger' ? ' (Tiger live)' : '';
+  setStatus(`Parsed ${data.ticker} — ${data.expiration} (${data.levels.length} strikes)${source}`);
+}
+
+async function downloadPdf() {
+  if (!currentData) return;
+  pdfBtn.disabled = true;
+  setStatus('Building PDF...');
+
+  try {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const margin = 48;
+    let y = margin;
+
+    doc.setFontSize(16);
+    doc.setFont(undefined, 'bold');
+    doc.text(`${currentData.ticker} GEX Summary`, margin, y);
+    y += 20;
+
+    doc.setFontSize(10);
+    doc.setFont(undefined, 'normal');
+    doc.setTextColor(100);
+    const ma = currentData.movingAverages;
+    const maStr = ma ? ` · 30MA $${ma.ma30 ?? '—'} / 200MA ${ma.ma200 ?? 'n/a'}` : '';
+    const vp = currentData.volumeProfile;
+    const vpStr = vp ? ` · POC $${vp.poc} (VA $${vp.value_area_low}–$${vp.value_area_high})` : '';
+    const meta = `Spot $${currentData.spot_price} · Expiration ${currentData.expiration} · ${currentData.read_type} read · ${new Date(currentData.captured_at).toLocaleString()}${maStr}${vpStr}`;
+    doc.text(meta, margin, y);
+    y += 24;
+    doc.setTextColor(0);
+
+    // Chart image, captured from the live canvas
+    const canvas = document.getElementById('gexChart');
+    const imgData = canvas.toDataURL('image/png', 1.0);
+    const imgWidth = pageWidth - margin * 2;
+    const imgHeight = (canvas.height / canvas.width) * imgWidth;
+    doc.addImage(imgData, 'PNG', margin, y, imgWidth, imgHeight);
+    y += imgHeight + 24;
+
+    // Volume profile chart, if one was rendered for this snapshot.
+    if (vpChartInstance && vpChartWrap.style.height !== '0px' && vpChartWrap.style.height !== '0') {
+      const vpCanvas = document.getElementById('vpChart');
+      const vpImgData = vpCanvas.toDataURL('image/png', 1.0);
+      const vpImgHeight = (vpCanvas.height / vpCanvas.width) * imgWidth;
+      if (y + vpImgHeight > doc.internal.pageSize.getHeight() - margin) {
+        doc.addPage();
+        y = margin;
       }
-      setLoaded(true);
-    }, (err) => {
-      setLoaded(true);
-      flashStatus("Can't connect — check Firebase rules");
-    });
-    return () => dbRef.off();
-  }, []);
-
-  const flashStatus = useCallback((msg) => {
-    setStatusMsg(msg);
-    clearTimeout(flashStatus._t);
-    flashStatus._t = setTimeout(() => setStatusMsg(""), 1400);
-  }, []);
-
-  const persist = useCallback(async (nextDecks) => {
-    if (!configOk) {
-      flashStatus("No Firebase config set");
-      return;
+      doc.addImage(vpImgData, 'PNG', margin, y, imgWidth, vpImgHeight);
+      y += vpImgHeight + 24;
     }
-    try {
-      await dbRef.set(nextDecks);
-      flashStatus("Saved");
-    } catch (e) {
-      flashStatus("Save failed — try again");
-    }
-  }, [flashStatus]);
 
-  const updateDeck = (idx, field, value) => {
-    setDecks((prev) => {
-      const next = prev.slice();
-      next[idx] = { ...next[idx], [field]: value };
-      clearTimeout(saveTimers.current[idx]);
-      saveTimers.current[idx] = setTimeout(() => persist(next), 400);
-      return next;
+    if (currentAnalysis) {
+      doc.setFontSize(12);
+      doc.setFont(undefined, 'bold');
+      doc.text('Analysis', margin, y);
+      y += 16;
+
+      doc.setFontSize(10.5);
+      doc.setFont(undefined, 'normal');
+      const lines = doc.splitTextToSize(currentAnalysis, pageWidth - margin * 2);
+      lines.forEach((line) => {
+        if (y > doc.internal.pageSize.getHeight() - margin) {
+          doc.addPage();
+          y = margin;
+        }
+        doc.text(line, margin, y);
+        y += 14;
+      });
+    }
+
+    doc.setFontSize(8);
+    doc.setTextColor(150);
+    doc.text(
+      'Generated from a manually captured screenshot. Not financial advice.',
+      margin,
+      doc.internal.pageSize.getHeight() - 24
+    );
+
+    doc.save(`${currentData.ticker}_GEX_${currentData.expiration}.pdf`);
+    setStatus('PDF downloaded.');
+  } catch (err) {
+    setStatus('PDF generation failed: ' + err.message, true);
+  } finally {
+    pdfBtn.disabled = false;
+  }
+}
+
+function renderChart(data) {
+  const labels = data.levels.map((l) => '$' + l.strike);
+  const values = data.levels.map((l) => l.net_gex_millions);
+  const colors = data.levels.map((l) =>
+    l.is_flip_zone ? '#eda100' : l.net_gex_millions >= 0 ? '#199e70' : '#e66767'
+  );
+
+  chartWrap.style.height = Math.max(300, data.levels.length * 32 + 80) + 'px';
+
+  if (chartInstance) chartInstance.destroy();
+
+  chartInstance = new Chart(document.getElementById('gexChart'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{ data: values, backgroundColor: colors, borderRadius: 4, barThickness: 20 }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const v = ctx.raw;
+              return (v < 0 ? '-' : '+') + '$' + Math.abs(v).toFixed(2) + 'M';
+            },
+          },
+        },
+        title: {
+          display: true,
+          text: `${data.ticker} · spot $${data.spot_price} · exp ${data.expiration}`,
+          color: '#ccc',
+          font: { size: 13, weight: 'normal' },
+        },
+      },
+      scales: {
+        x: {
+          grid: { color: 'rgba(150,150,150,0.15)' },
+          ticks: { color: '#999', callback: (v) => (v < 0 ? '-' : '+') + '$' + Math.abs(v) + 'M' },
+        },
+        y: { grid: { display: false }, ticks: { color: '#999' } },
+      },
+    },
+  });
+}
+
+function saveToHistory(data) {
+  const key = 'gex_history';
+  const existing = JSON.parse(localStorage.getItem(key) || '[]');
+  existing.unshift(data);
+  localStorage.setItem(key, JSON.stringify(existing.slice(0, 50)));
+  renderHistory();
+}
+
+function renderHistory() {
+  const existing = JSON.parse(localStorage.getItem('gex_history') || '[]');
+  historyList.innerHTML = '';
+
+  // Populate ticker filter options
+  const tickers = [...new Set(existing.map((i) => i.ticker))].sort();
+  const prevSelection = tickerFilter.value;
+  tickerFilter.innerHTML = '<option value="">All tickers</option>' +
+    tickers.map((t) => `<option value="${t}">${t}</option>`).join('');
+  tickerFilter.value = tickers.includes(prevSelection) ? prevSelection : '';
+
+  const filtered = tickerFilter.value
+    ? existing.filter((i) => i.ticker === tickerFilter.value)
+    : existing;
+
+  filtered.forEach((item) => {
+    const div = document.createElement('div');
+    div.className = 'history-item';
+    const when = new Date(item.captured_at).toLocaleString();
+    div.innerHTML = `<span>${item.ticker} · ${item.expiration} · ${item.read_type}</span><span>${when}</span>`;
+    div.addEventListener('click', () => {
+      currentData = item;
+      currentAnalysis = item.analysis || null;
+      renderChart(item);
+      showMaInfo(item.movingAverages);
+      if (item.volumeProfile) {
+        showVolumeProfileInfo(item.volumeProfile);
+        renderVolumeProfileChart(item.volumeProfile, item);
+      } else {
+        vpInfoBox.style.display = 'none';
+        vpChartWrap.style.height = '0';
+      }
+      if (currentAnalysis) {
+        analysisBox.textContent = currentAnalysis;
+        analysisBox.style.display = 'block';
+      } else {
+        analysisBox.style.display = 'none';
+      }
+      pdfBtn.disabled = false;
     });
+    historyList.appendChild(div);
+  });
+
+  updateWeeklyButtonState();
+}
+
+function updateWeeklyButtonState() {
+  const eligible = getEligibleSnapshotsForWeekly();
+  weeklyBtn.disabled = eligible.length < 2;
+  weeklyBtn.textContent = eligible.length < 2
+    ? 'Generate weekly read (need 2+ same-ticker snapshots)'
+    : `Generate weekly read (${eligible.length} snapshots)`;
+
+  const monthlyEligible = getEligibleSnapshotsForMonthly();
+  monthlyBtn.disabled = monthlyEligible.length < 5;
+  monthlyBtn.textContent = monthlyEligible.length < 5
+    ? 'Generate monthly read (need 5+ same-ticker snapshots)'
+    : `Generate monthly read (${monthlyEligible.length} snapshots)`;
+}
+
+function getEligibleSnapshotsForWeekly() {
+  const existing = JSON.parse(localStorage.getItem('gex_history') || '[]');
+  const ticker = tickerFilter.value;
+  if (!ticker) return [];
+  // Same ticker, same expiration column, oldest to newest, most recent 7.
+  const sameTicker = existing.filter((i) => i.ticker === ticker);
+  const expirations = {};
+  sameTicker.forEach((s) => {
+    expirations[s.expiration] = (expirations[s.expiration] || 0) + 1;
+  });
+  const mostCommonExp = Object.entries(expirations).sort((a, b) => b[1] - a[1])[0]?.[0];
+  return sameTicker
+    .filter((s) => s.expiration === mostCommonExp)
+    .sort((a, b) => new Date(a.captured_at) - new Date(b.captured_at))
+    .slice(-7);
+}
+
+function getEligibleSnapshotsForMonthly() {
+  const existing = JSON.parse(localStorage.getItem('gex_history') || '[]');
+  const ticker = tickerFilter.value;
+  if (!ticker) return [];
+  // Same ticker only - NOT locked to one expiration, since a month
+  // naturally spans several weekly/monthly expiration cycles. Most
+  // recent 22 snapshots (~ a trading month).
+  return existing
+    .filter((s) => s.ticker === ticker)
+    .sort((a, b) => new Date(a.captured_at) - new Date(b.captured_at))
+    .slice(-22);
+}
+
+async function generateMonthlyRead() {
+  const snapshots = getEligibleSnapshotsForMonthly();
+  if (snapshots.length < 5) return;
+
+  monthlyBtn.disabled = true;
+  setStatus('Building monthly regime read...');
+
+  try {
+    const res = await fetch('/api/analyze-monthly', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ snapshots }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Request failed (${res.status})`);
+    }
+
+    const data = await res.json();
+    currentMonthly = data;
+    monthlyAnalysisText.textContent = data.analysis;
+    renderMonthlyChart(data);
+    monthlyBox.style.display = 'block';
+    setStatus(`Monthly read generated from ${data.snapshot_count} snapshots.`);
+  } catch (err) {
+    setStatus(err.message, true);
+  } finally {
+    updateWeeklyButtonState();
+  }
+}
+
+function renderMonthlyChart(data) {
+  const labels = data.flip_zone_trend.map((d) => new Date(d.captured_at).toLocaleDateString());
+  const spotData = data.flip_zone_trend.map((d) => d.spot_price);
+  const flipData = data.flip_zone_trend.map((d) => d.flip_zone);
+
+  monthlyChartWrap.style.height = '280px';
+
+  if (monthlyChartInstance) monthlyChartInstance.destroy();
+
+  monthlyChartInstance = new Chart(document.getElementById('monthlyChart'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Spot price', data: spotData, borderColor: '#3b82f6', backgroundColor: 'transparent', tension: 0.15, pointRadius: 3 },
+        { label: 'Flip zone strike', data: flipData, borderColor: '#eda100', backgroundColor: 'transparent', tension: 0.15, pointRadius: 3, spanGaps: true },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: true, labels: { color: '#999', font: { size: 10 } } },
+        title: {
+          display: true,
+          text: `${data.ticker} spot vs flip zone over ${data.snapshot_count} sessions`,
+          color: '#ccc',
+          font: { size: 12, weight: 'normal' },
+        },
+      },
+      scales: {
+        y: { grid: { color: 'rgba(150,150,150,0.15)' }, ticks: { color: '#999' } },
+        x: { grid: { display: false }, ticks: { color: '#999', maxTicksLimit: 10 } },
+      },
+    },
+  });
+}
+
+async function downloadMonthlyPdf() {
+  if (!currentMonthly) return;
+  monthlyPdfBtn.disabled = true;
+
+  try {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const margin = 48;
+    let y = margin;
+
+    doc.setFontSize(16);
+    doc.setFont(undefined, 'bold');
+    doc.text(`${currentMonthly.ticker} Monthly GEX Read`, margin, y);
+    y += 20;
+
+    doc.setFontSize(10);
+    doc.setFont(undefined, 'normal');
+    doc.setTextColor(100);
+    const [from, to] = currentMonthly.date_range;
+    doc.text(
+      `${currentMonthly.snapshot_count} sessions · ${new Date(from).toLocaleDateString()} to ${new Date(to).toLocaleDateString()}`,
+      margin, y
+    );
+    y += 24;
+    doc.setTextColor(0);
+
+    const canvas = document.getElementById('monthlyChart');
+    const imgData = canvas.toDataURL('image/png', 1.0);
+    const imgWidth = pageWidth - margin * 2;
+    const imgHeight = (canvas.height / canvas.width) * imgWidth;
+    doc.addImage(imgData, 'PNG', margin, y, imgWidth, imgHeight);
+    y += imgHeight + 24;
+
+    doc.setFontSize(12);
+    doc.setFont(undefined, 'bold');
+    doc.text('Monthly Analysis', margin, y);
+    y += 16;
+
+    doc.setFontSize(10.5);
+    doc.setFont(undefined, 'normal');
+    const lines = doc.splitTextToSize(currentMonthly.analysis, pageWidth - margin * 2);
+    lines.forEach((line) => {
+      if (y > doc.internal.pageSize.getHeight() - margin) {
+        doc.addPage();
+        y = margin;
+      }
+      doc.text(line, margin, y);
+      y += 14;
+    });
+
+    doc.setFontSize(8);
+    doc.setTextColor(150);
+    doc.text(
+      'Generated from manually captured screenshots. Not financial advice.',
+      margin,
+      doc.internal.pageSize.getHeight() - 24
+    );
+
+    doc.save(`${currentMonthly.ticker}_Monthly_GEX.pdf`);
+  } finally {
+    monthlyPdfBtn.disabled = false;
+  }
+}
+
+async function generateWeeklyRead() {
+  const snapshots = getEligibleSnapshotsForWeekly();
+  if (snapshots.length < 2) return;
+
+  weeklyBtn.disabled = true;
+  setStatus('Comparing snapshots...');
+
+  try {
+    const res = await fetch(WEEKLY_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ snapshots }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Request failed (${res.status})`);
+    }
+
+    const data = await res.json();
+    currentWeekly = data;
+    weeklyAnalysisText.textContent = data.analysis;
+    renderWeeklyChart(data);
+    weeklyBox.style.display = 'block';
+    setStatus(`Weekly read generated from ${data.snapshot_count} snapshots.`);
+  } catch (err) {
+    setStatus(err.message, true);
+  } finally {
+    updateWeeklyButtonState();
+  }
+}
+
+function renderWeeklyChart(data) {
+  const labels = data.deltas.map((d) => '$' + d.strike);
+  const changes = data.deltas.map((d) => d.change ?? 0);
+  const colors = changes.map((c) => (c >= 0 ? '#3b82f6' : '#f59e0b'));
+
+  weeklyChartWrap.style.height = Math.max(280, data.deltas.length * 30 + 60) + 'px';
+
+  if (weeklyChartInstance) weeklyChartInstance.destroy();
+
+  weeklyChartInstance = new Chart(document.getElementById('weeklyChart'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Change in Net GEX ($M) over period',
+        data: changes,
+        backgroundColor: colors,
+        borderRadius: 4,
+        barThickness: 18,
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        title: {
+          display: true,
+          text: `${data.ticker} · change from first to latest snapshot`,
+          color: '#ccc',
+          font: { size: 12, weight: 'normal' },
+        },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const v = ctx.raw;
+              return (v < 0 ? '' : '+') + v.toFixed(2) + 'M change';
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          grid: { color: 'rgba(150,150,150,0.15)' },
+          ticks: { color: '#999' },
+        },
+        y: { grid: { display: false }, ticks: { color: '#999' } },
+      },
+    },
+  });
+}
+
+async function downloadWeeklyPdf() {
+  if (!currentWeekly) return;
+  weeklyPdfBtn.disabled = true;
+
+  try {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const margin = 48;
+    let y = margin;
+
+    doc.setFontSize(16);
+    doc.setFont(undefined, 'bold');
+    doc.text(`${currentWeekly.ticker} Weekly GEX Read`, margin, y);
+    y += 20;
+
+    doc.setFontSize(10);
+    doc.setFont(undefined, 'normal');
+    doc.setTextColor(100);
+    const [from, to] = currentWeekly.date_range;
+    doc.text(
+      `${currentWeekly.snapshot_count} snapshots · ${new Date(from).toLocaleDateString()} to ${new Date(to).toLocaleDateString()}`,
+      margin, y
+    );
+    y += 24;
+    doc.setTextColor(0);
+
+    const canvas = document.getElementById('weeklyChart');
+    const imgData = canvas.toDataURL('image/png', 1.0);
+    const imgWidth = pageWidth - margin * 2;
+    const imgHeight = (canvas.height / canvas.width) * imgWidth;
+    doc.addImage(imgData, 'PNG', margin, y, imgWidth, imgHeight);
+    y += imgHeight + 24;
+
+    doc.setFontSize(12);
+    doc.setFont(undefined, 'bold');
+    doc.text('Weekly Analysis', margin, y);
+    y += 16;
+
+    doc.setFontSize(10.5);
+    doc.setFont(undefined, 'normal');
+    const lines = doc.splitTextToSize(currentWeekly.analysis, pageWidth - margin * 2);
+    lines.forEach((line) => {
+      if (y > doc.internal.pageSize.getHeight() - margin) {
+        doc.addPage();
+        y = margin;
+      }
+      doc.text(line, margin, y);
+      y += 14;
+    });
+
+    doc.setFontSize(8);
+    doc.setTextColor(150);
+    doc.text(
+      'Generated from manually captured screenshots. Not financial advice.',
+      margin,
+      doc.internal.pageSize.getHeight() - 24
+    );
+
+    doc.save(`${currentWeekly.ticker}_Weekly_GEX.pdf`);
+  } finally {
+    weeklyPdfBtn.disabled = false;
+  }
+}
+
+tickerFilter.addEventListener('change', () => { renderHistory(); weeklyBox.style.display = 'none'; monthlyBox.style.display = 'none'; });
+weeklyBtn.addEventListener('click', generateWeeklyRead);
+weeklyPdfBtn.addEventListener('click', downloadWeeklyPdf);
+monthlyBtn.addEventListener('click', generateMonthlyRead);
+monthlyPdfBtn.addEventListener('click', downloadMonthlyPdf);
+
+parseBtn.addEventListener('click', parseAndVisualize);
+pdfBtn.addEventListener('click', downloadPdf);
+
+// ---------- EOD Flow Analysis ----------
+
+const flowFileInput = document.getElementById('flowFileInput');
+const flowDropZone = document.getElementById('flowDropZone');
+const flowDropZoneLabel = document.getElementById('flowDropZoneLabel');
+const flowParseBtn = document.getElementById('flowParseBtn');
+const flowPdfBtn = document.getElementById('flowPdfBtn');
+const flowStatusEl = document.getElementById('flowStatus');
+const flowSummaryBox = document.getElementById('flowSummaryBox');
+const flowChartWrap = document.getElementById('flowChartWrap');
+const flowAnalysisBox = document.getElementById('flowAnalysisBox');
+
+let selectedFlowFile = null;
+let currentFlowStats = null;
+let currentFlowAnalysis = null;
+let flowChartInstance = null;
+
+function setFlowStatus(msg, isError = false) {
+  flowStatusEl.textContent = msg;
+  flowStatusEl.className = 'status' + (isError ? ' error' : '');
+}
+
+function setSelectedFlowFile(file) {
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith('.csv')) {
+    setFlowStatus('Please provide a .csv file.', true);
+    return;
+  }
+  selectedFlowFile = file;
+  flowParseBtn.disabled = false;
+  flowDropZoneLabel.textContent = file.name;
+  setFlowStatus('');
+}
+
+flowFileInput.addEventListener('change', (e) => {
+  setSelectedFlowFile(e.target.files[0] || null);
+});
+
+['dragenter', 'dragover'].forEach((evt) => {
+  flowDropZone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    flowDropZone.classList.add('drag-over');
+  });
+});
+['dragleave', 'dragend'].forEach((evt) => {
+  flowDropZone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    flowDropZone.classList.remove('drag-over');
+  });
+});
+flowDropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  flowDropZone.classList.remove('drag-over');
+  const file = e.dataTransfer.files && e.dataTransfer.files[0];
+  setSelectedFlowFile(file);
+});
+
+// Minimal CSV parser - handles the flat, unquoted-field format of the
+// Bullflow Collections export. Not a general-purpose CSV parser.
+function parseFlowCsv(text) {
+  const lines = text.trim().split('\n');
+  const headers = lines[0].split(',').map((h) => h.trim());
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    const cells = lines[i].split(',');
+    const row = {};
+    headers.forEach((h, idx) => { row[h] = (cells[idx] || '').trim(); });
+    rows.push(row);
+  }
+  return rows;
+}
+
+function computeFlowStats(rows) {
+  const num = (v) => {
+    const n = parseFloat(v);
+    return Number.isFinite(n) ? n : null;
   };
 
-  const claimedCount = decks.filter((d) => d.claim.trim() !== "").length;
+  let callPremium = 0, putPremium = 0;
+  let sweepPremium = 0, blockPremium = 0;
+  let aggBuyPremium = 0, aggSellPremium = 0, midPremium = 0;
+  const clusters = {}; // key: strike|expiration|optionType
 
-  if (!loaded) {
-    return <div style={{ padding: 24, color: "var(--muted)", fontSize: 14 }}>Loading list…</div>;
-  }
+  rows.forEach((r) => {
+    const premium = num(r.premium) || 0;
+    if (r.optionType === 'C') callPremium += premium;
+    if (r.optionType === 'P') putPremium += premium;
 
-  return (
-    <div>
-      <div className="top-bar">
-        <h1>Deck Draft List</h1>
-        <span className="count">{claimedCount}/{DECK_COUNT} claimed</span>
-      </div>
-      <div className="sub">
-        {configOk
-          ? "Shared with everyone who has this link — edit a deck name or claim it as yours. Changes sync live for everyone, no account needed."
-          : "⚠️ Firebase isn't configured yet — edits here won't be saved or shared. See the setup comment at the top of this file's HTML."}
-      </div>
+    if (r.tradeType === 'SWEEP') sweepPremium += premium;
+    if (r.tradeType === 'BLOCK') blockPremium += premium;
 
-      {decks.map((deck, idx) => (
-        <div key={idx} className={`row ${deck.claim.trim() ? "claimed" : ""}`}>
-          <span className="num">{idx + 1}</span>
-          <input
-            className="deck-input"
-            value={deck.name}
-            onChange={(e) => updateDeck(idx, "name", e.target.value)}
-            placeholder={`Deck ${idx + 1}`}
-          />
-          <span className="arrow">→</span>
-          <input
-            className={`claim-input ${deck.claim.trim() ? "filled" : ""}`}
-            value={deck.claim}
-            onChange={(e) => updateDeck(idx, "claim", e.target.value)}
-            placeholder="Who wants it?"
-          />
-        </div>
-      ))}
+    if (r.spreadExecution === 'Ask' || r.spreadExecution === 'Above Ask') aggBuyPremium += premium;
+    else if (r.spreadExecution === 'Bid' || r.spreadExecution === 'Below Bid') aggSellPremium += premium;
+    else midPremium += premium;
 
-      <div className={`status ${statusMsg ? "show" : ""}`}>{statusMsg}</div>
-    </div>
-  );
+    const key = `${r.strikePrice}|${r.expirationDate}|${r.optionType}`;
+    if (!clusters[key]) {
+      clusters[key] = {
+        strike: num(r.strikePrice),
+        expiration: r.expirationDate,
+        optionType: r.optionType,
+        premium: 0,
+        count: 0,
+        maxScore: 0,
+      };
+    }
+    clusters[key].premium += premium;
+    clusters[key].count += 1;
+    const score = num(r.score);
+    if (score !== null && score > clusters[key].maxScore) clusters[key].maxScore = score;
+  });
+
+  const totalPremium = callPremium + putPremium;
+  const spotPrices = rows.map((r) => num(r.spotPrice)).filter((v) => v !== null);
+  const spotPrice = spotPrices.length ? spotPrices[spotPrices.length - 1] : null;
+  const ticker = rows.length ? (rows[0].tickerSymbol || rows[0].Symbol || 'UNKNOWN').split(':')[0] : 'UNKNOWN';
+
+  const topClusters = Object.values(clusters)
+    .filter((c) => c.count >= 2) // repeated trades only - single prints aren't "clusters"
+    .sort((a, b) => b.premium - a.premium)
+    .slice(0, 8);
+
+  // For the chart: top strikes by combined premium (put+call together)
+  const byStrike = {};
+  rows.forEach((r) => {
+    const strike = num(r.strikePrice);
+    if (strike === null) return;
+    if (!byStrike[strike]) byStrike[strike] = { strike, call: 0, put: 0 };
+    const premium = num(r.premium) || 0;
+    if (r.optionType === 'C') byStrike[strike].call += premium;
+    else byStrike[strike].put += premium;
+  });
+  const topStrikes = Object.values(byStrike)
+    .sort((a, b) => (b.call + b.put) - (a.call + a.put))
+    .slice(0, 20)
+    .sort((a, b) => b.strike - a.strike);
+
+  return {
+    ticker,
+    spot_price: spotPrice,
+    trade_count: rows.length,
+    call_premium: Math.round(callPremium),
+    put_premium: Math.round(putPremium),
+    total_premium: Math.round(totalPremium),
+    put_call_ratio_pct: totalPremium ? +(putPremium / totalPremium * 100).toFixed(1) : null,
+    sweep_premium: Math.round(sweepPremium),
+    block_premium: Math.round(blockPremium),
+    aggressive_buy_premium: Math.round(aggBuyPremium),
+    aggressive_sell_premium: Math.round(aggSellPremium),
+    top_clusters: topClusters,
+    top_strikes: topStrikes,
+    captured_at: new Date().toISOString(),
+  };
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+function showFlowSummary(stats) {
+  flowSummaryBox.textContent =
+    `${stats.ticker} · ${stats.trade_count} trades · Puts ${stats.put_call_ratio_pct}% / Calls ${(100 - stats.put_call_ratio_pct).toFixed(1)}% ` +
+    `· Aggressive buy $${(stats.aggressive_buy_premium / 1e6).toFixed(1)}M vs sell $${(stats.aggressive_sell_premium / 1e6).toFixed(1)}M`;
+  flowSummaryBox.style.display = 'block';
+}
+
+function renderFlowChart(stats) {
+  const labels = stats.top_strikes.map((s) => '$' + s.strike);
+  const callData = stats.top_strikes.map((s) => +(s.call / 1e6).toFixed(2));
+  const putData = stats.top_strikes.map((s) => -+(s.put / 1e6).toFixed(2)); // negative so puts render opposite calls
+
+  flowChartWrap.style.height = Math.max(280, stats.top_strikes.length * 26 + 60) + 'px';
+
+  if (flowChartInstance) flowChartInstance.destroy();
+
+  flowChartInstance = new Chart(document.getElementById('flowChart'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Call premium ($M)', data: callData, backgroundColor: '#199e70', borderRadius: 3, barThickness: 14 },
+        { label: 'Put premium ($M)', data: putData, backgroundColor: '#e66767', borderRadius: 3, barThickness: 14 },
+      ],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: true, labels: { color: '#999', font: { size: 10 } } },
+        title: {
+          display: true,
+          text: `${stats.ticker} premium by strike (today's flow)`,
+          color: '#ccc',
+          font: { size: 12, weight: 'normal' },
+        },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => `${ctx.dataset.label}: $${Math.abs(ctx.raw).toFixed(2)}M`,
+          },
+        },
+      },
+      scales: {
+        x: { grid: { color: 'rgba(150,150,150,0.15)' }, ticks: { color: '#999' } },
+        y: { grid: { display: false }, ticks: { color: '#999' } },
+      },
+    },
+  });
+}
+
+async function parseAndAnalyzeFlow() {
+  if (!selectedFlowFile) return;
+  flowParseBtn.disabled = true;
+  flowSummaryBox.style.display = 'none';
+  flowChartWrap.style.height = '0';
+  flowAnalysisBox.style.display = 'none';
+  setFlowStatus('Reading CSV...');
+
+  try {
+    const text = await selectedFlowFile.text();
+    const rows = parseFlowCsv(text);
+
+    if (!rows.length) {
+      throw new Error('No rows found in this CSV.');
+    }
+
+    setFlowStatus('Computing stats...');
+    const stats = computeFlowStats(rows);
+    currentFlowStats = stats;
+    showFlowSummary(stats);
+    renderFlowChart(stats);
+
+    setFlowStatus('Writing EOD summary...');
+
+    // If today's GEX data for the same ticker is already loaded, pass it
+    // along so the write-up can note confirmation/contradiction.
+    const gexContext = currentData && currentData.ticker === stats.ticker
+      ? { expiration: currentData.expiration, spot_price: currentData.spot_price, levels: currentData.levels }
+      : null;
+
+    const res = await fetch('/api/analyze-flow', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stats, gexContext }),
+    });
+
+    if (res.ok) {
+      const { analysis } = await res.json();
+      currentFlowAnalysis = analysis;
+      flowAnalysisBox.textContent = analysis;
+      flowAnalysisBox.style.display = 'block';
+      saveFlowToHistory(stats, analysis);
+    } else {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Analysis request failed');
+    }
+
+    flowPdfBtn.disabled = false;
+    setFlowStatus(`Analyzed ${stats.trade_count} trades for ${stats.ticker}.`);
+  } catch (err) {
+    setFlowStatus(err.message, true);
+  } finally {
+    flowParseBtn.disabled = false;
+  }
+}
+
+async function downloadFlowPdf() {
+  if (!currentFlowStats) return;
+  flowPdfBtn.disabled = true;
+
+  try {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const margin = 48;
+    let y = margin;
+
+    doc.setFontSize(16);
+    doc.setFont(undefined, 'bold');
+    doc.text(`${currentFlowStats.ticker} EOD Flow Summary`, margin, y);
+    y += 20;
+
+    doc.setFontSize(10);
+    doc.setFont(undefined, 'normal');
+    doc.setTextColor(100);
+    const meta = `${currentFlowStats.trade_count} trades · Puts ${currentFlowStats.put_call_ratio_pct}% / Calls ${(100 - currentFlowStats.put_call_ratio_pct).toFixed(1)}% · ${new Date(currentFlowStats.captured_at).toLocaleString()}`;
+    doc.text(meta, margin, y);
+    y += 24;
+    doc.setTextColor(0);
+
+    const canvas = document.getElementById('flowChart');
+    const imgData = canvas.toDataURL('image/png', 1.0);
+    const imgWidth = pageWidth - margin * 2;
+    const imgHeight = (canvas.height / canvas.width) * imgWidth;
+    doc.addImage(imgData, 'PNG', margin, y, imgWidth, imgHeight);
+    y += imgHeight + 24;
+
+    if (currentFlowAnalysis) {
+      doc.setFontSize(12);
+      doc.setFont(undefined, 'bold');
+      doc.text('Analysis', margin, y);
+      y += 16;
+
+      doc.setFontSize(10.5);
+      doc.setFont(undefined, 'normal');
+      const lines = doc.splitTextToSize(currentFlowAnalysis, pageWidth - margin * 2);
+      lines.forEach((line) => {
+        if (y > doc.internal.pageSize.getHeight() - margin) {
+          doc.addPage();
+          y = margin;
+        }
+        doc.text(line, margin, y);
+        y += 14;
+      });
+    }
+
+    doc.setFontSize(8);
+    doc.setTextColor(150);
+    doc.text(
+      'Generated from a manually exported flow CSV. Not financial advice.',
+      margin,
+      doc.internal.pageSize.getHeight() - 24
+    );
+
+    doc.save(`${currentFlowStats.ticker}_EOD_Flow_${currentFlowStats.captured_at.slice(0, 10)}.pdf`);
+  } finally {
+    flowPdfBtn.disabled = false;
+  }
+}
+
+flowParseBtn.addEventListener('click', parseAndAnalyzeFlow);
+flowPdfBtn.addEventListener('click', downloadFlowPdf);
+
+// ---------- Flow history + weekly flow comparison ----------
+
+const flowTickerFilter = document.getElementById('flowTickerFilter');
+const flowHistoryList = document.getElementById('flowHistoryList');
+const flowWeeklyBtn = document.getElementById('flowWeeklyBtn');
+const flowWeeklyBox = document.getElementById('flowWeeklyBox');
+const flowWeeklyAnalysisText = document.getElementById('flowWeeklyAnalysisText');
+const flowWeeklyChartWrap = document.getElementById('flowWeeklyChartWrap');
+const flowWeeklyPdfBtn = document.getElementById('flowWeeklyPdfBtn');
+const flowMonthlyBtn = document.getElementById('flowMonthlyBtn');
+const flowMonthlyBox = document.getElementById('flowMonthlyBox');
+const flowMonthlyAnalysisText = document.getElementById('flowMonthlyAnalysisText');
+const flowMonthlyChartWrap = document.getElementById('flowMonthlyChartWrap');
+const flowMonthlyPdfBtn = document.getElementById('flowMonthlyPdfBtn');
+
+let currentFlowWeekly = null;
+let flowWeeklyChartInstance = null;
+let currentFlowMonthly = null;
+let flowMonthlyChartInstance = null;
+
+function saveFlowToHistory(stats, analysis) {
+  const key = 'flow_history';
+  const existing = JSON.parse(localStorage.getItem(key) || '[]');
+  existing.unshift({ ...stats, analysis });
+  localStorage.setItem(key, JSON.stringify(existing.slice(0, 50)));
+  renderFlowHistory();
+}
+
+function renderFlowHistory() {
+  const existing = JSON.parse(localStorage.getItem('flow_history') || '[]');
+  flowHistoryList.innerHTML = '';
+
+  const tickers = [...new Set(existing.map((i) => i.ticker))].sort();
+  const prevSelection = flowTickerFilter.value;
+  flowTickerFilter.innerHTML = '<option value="">All tickers</option>' +
+    tickers.map((t) => `<option value="${t}">${t}</option>`).join('');
+  flowTickerFilter.value = tickers.includes(prevSelection) ? prevSelection : '';
+
+  const filtered = flowTickerFilter.value
+    ? existing.filter((i) => i.ticker === flowTickerFilter.value)
+    : existing;
+
+  filtered.forEach((item) => {
+    const div = document.createElement('div');
+    div.className = 'history-item';
+    const when = new Date(item.captured_at).toLocaleString();
+    div.innerHTML = `<span>${item.ticker} · ${item.trade_count} trades · ${item.put_call_ratio_pct}% puts</span><span>${when}</span>`;
+    div.addEventListener('click', () => {
+      currentFlowStats = item;
+      currentFlowAnalysis = item.analysis || null;
+      showFlowSummary(item);
+      renderFlowChart(item);
+      if (currentFlowAnalysis) {
+        flowAnalysisBox.textContent = currentFlowAnalysis;
+        flowAnalysisBox.style.display = 'block';
+      } else {
+        flowAnalysisBox.style.display = 'none';
+      }
+      flowPdfBtn.disabled = false;
+    });
+    flowHistoryList.appendChild(div);
+  });
+
+  updateFlowWeeklyButtonState();
+}
+
+function updateFlowWeeklyButtonState() {
+  const eligible = getEligibleFlowSnapshotsForWeekly();
+  flowWeeklyBtn.disabled = eligible.length < 2;
+  flowWeeklyBtn.textContent = eligible.length < 2
+    ? 'Generate weekly flow read (need 2+ same-ticker days)'
+    : `Generate weekly flow read (${eligible.length} days)`;
+
+  const monthlyEligible = getEligibleFlowSnapshotsForMonthly();
+  flowMonthlyBtn.disabled = monthlyEligible.length < 5;
+  flowMonthlyBtn.textContent = monthlyEligible.length < 5
+    ? 'Generate monthly flow read (need 5+ same-ticker days)'
+    : `Generate monthly flow read (${monthlyEligible.length} days)`;
+}
+
+function getEligibleFlowSnapshotsForWeekly() {
+  const existing = JSON.parse(localStorage.getItem('flow_history') || '[]');
+  const ticker = flowTickerFilter.value;
+  if (!ticker) return [];
+  return existing
+    .filter((s) => s.ticker === ticker)
+    .sort((a, b) => new Date(a.captured_at) - new Date(b.captured_at))
+    .slice(-7);
+}
+
+function getEligibleFlowSnapshotsForMonthly() {
+  const existing = JSON.parse(localStorage.getItem('flow_history') || '[]');
+  const ticker = flowTickerFilter.value;
+  if (!ticker) return [];
+  return existing
+    .filter((s) => s.ticker === ticker)
+    .sort((a, b) => new Date(a.captured_at) - new Date(b.captured_at))
+    .slice(-22);
+}
+
+async function generateMonthlyFlowRead() {
+  const snapshots = getEligibleFlowSnapshotsForMonthly();
+  if (snapshots.length < 5) return;
+
+  flowMonthlyBtn.disabled = true;
+  setFlowStatus('Building monthly flow regime read...');
+
+  try {
+    const res = await fetch('/api/analyze-flow-monthly', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ snapshots }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Request failed (${res.status})`);
+    }
+
+    const data = await res.json();
+    currentFlowMonthly = data;
+    flowMonthlyAnalysisText.textContent = data.analysis;
+    renderFlowMonthlyChart(data);
+    flowMonthlyBox.style.display = 'block';
+    setFlowStatus(`Monthly flow read generated from ${data.snapshot_count} days.`);
+  } catch (err) {
+    setFlowStatus(err.message, true);
+  } finally {
+    updateFlowWeeklyButtonState();
+  }
+}
+
+function renderFlowMonthlyChart(data) {
+  const labels = data.put_call_trend.map((d) => new Date(d.captured_at).toLocaleDateString());
+  const values = data.put_call_trend.map((d) => d.put_call_ratio_pct);
+
+  flowMonthlyChartWrap.style.height = '280px';
+
+  if (flowMonthlyChartInstance) flowMonthlyChartInstance.destroy();
+
+  flowMonthlyChartInstance = new Chart(document.getElementById('flowMonthlyChart'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Put % of total premium',
+        data: values,
+        borderColor: '#e66767',
+        backgroundColor: 'rgba(230,103,103,0.1)',
+        fill: true,
+        tension: 0.15,
+        pointRadius: 3,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        title: {
+          display: true,
+          text: `${data.ticker} put % trend over ${data.snapshot_count} days`,
+          color: '#ccc',
+          font: { size: 12, weight: 'normal' },
+        },
+        tooltip: { callbacks: { label: (ctx) => `${ctx.raw.toFixed(1)}% puts` } },
+      },
+      scales: {
+        y: { min: 0, max: 100, grid: { color: 'rgba(150,150,150,0.15)' }, ticks: { color: '#999' } },
+        x: { grid: { display: false }, ticks: { color: '#999', maxTicksLimit: 10 } },
+      },
+    },
+  });
+}
+
+async function downloadMonthlyFlowPdf() {
+  if (!currentFlowMonthly) return;
+  flowMonthlyPdfBtn.disabled = true;
+
+  try {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const margin = 48;
+    let y = margin;
+
+    doc.setFontSize(16);
+    doc.setFont(undefined, 'bold');
+    doc.text(`${currentFlowMonthly.ticker} Monthly Flow Read`, margin, y);
+    y += 20;
+
+    doc.setFontSize(10);
+    doc.setFont(undefined, 'normal');
+    doc.setTextColor(100);
+    const [from, to] = currentFlowMonthly.date_range;
+    doc.text(
+      `${currentFlowMonthly.snapshot_count} days · ${new Date(from).toLocaleDateString()} to ${new Date(to).toLocaleDateString()}`,
+      margin, y
+    );
+    y += 24;
+    doc.setTextColor(0);
+
+    const canvas = document.getElementById('flowMonthlyChart');
+    const imgData = canvas.toDataURL('image/png', 1.0);
+    const imgWidth = pageWidth - margin * 2;
+    const imgHeight = (canvas.height / canvas.width) * imgWidth;
+    doc.addImage(imgData, 'PNG', margin, y, imgWidth, imgHeight);
+    y += imgHeight + 24;
+
+    doc.setFontSize(12);
+    doc.setFont(undefined, 'bold');
+    doc.text('Monthly Flow Analysis', margin, y);
+    y += 16;
+
+    doc.setFontSize(10.5);
+    doc.setFont(undefined, 'normal');
+    const lines = doc.splitTextToSize(currentFlowMonthly.analysis, pageWidth - margin * 2);
+    lines.forEach((line) => {
+      if (y > doc.internal.pageSize.getHeight() - margin) {
+        doc.addPage();
+        y = margin;
+      }
+      doc.text(line, margin, y);
+      y += 14;
+    });
+
+    doc.setFontSize(8);
+    doc.setTextColor(150);
+    doc.text(
+      'Generated from manually exported flow CSVs. Not financial advice.',
+      margin,
+      doc.internal.pageSize.getHeight() - 24
+    );
+
+    doc.save(`${currentFlowMonthly.ticker}_Monthly_Flow.pdf`);
+  } finally {
+    flowMonthlyPdfBtn.disabled = false;
+  }
+}
+
+async function generateWeeklyFlowRead() {
+  const snapshots = getEligibleFlowSnapshotsForWeekly();
+  if (snapshots.length < 2) return;
+
+  flowWeeklyBtn.disabled = true;
+  setFlowStatus('Comparing daily flow snapshots...');
+
+  try {
+    const res = await fetch('/api/analyze-flow-weekly', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ snapshots }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Request failed (${res.status})`);
+    }
+
+    const data = await res.json();
+    currentFlowWeekly = data;
+    flowWeeklyAnalysisText.textContent = data.analysis;
+    renderFlowWeeklyChart(data);
+    flowWeeklyBox.style.display = 'block';
+    setFlowStatus(`Weekly flow read generated from ${data.snapshot_count} days.`);
+  } catch (err) {
+    setFlowStatus(err.message, true);
+  } finally {
+    updateFlowWeeklyButtonState();
+  }
+}
+
+function renderFlowWeeklyChart(data) {
+  const labels = data.put_call_trend.map((d) => new Date(d.captured_at).toLocaleDateString());
+  const values = data.put_call_trend.map((d) => d.put_call_ratio_pct);
+
+  flowWeeklyChartWrap.style.height = '260px';
+
+  if (flowWeeklyChartInstance) flowWeeklyChartInstance.destroy();
+
+  flowWeeklyChartInstance = new Chart(document.getElementById('flowWeeklyChart'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Put % of total premium',
+        data: values,
+        borderColor: '#e66767',
+        backgroundColor: 'rgba(230,103,103,0.15)',
+        fill: true,
+        tension: 0.2,
+        pointRadius: 4,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        title: {
+          display: true,
+          text: `${data.ticker} put % trend across ${data.snapshot_count} days`,
+          color: '#ccc',
+          font: { size: 12, weight: 'normal' },
+        },
+        tooltip: { callbacks: { label: (ctx) => `${ctx.raw.toFixed(1)}% puts` } },
+      },
+      scales: {
+        y: { min: 0, max: 100, grid: { color: 'rgba(150,150,150,0.15)' }, ticks: { color: '#999' } },
+        x: { grid: { display: false }, ticks: { color: '#999' } },
+      },
+    },
+  });
+}
+
+async function downloadWeeklyFlowPdf() {
+  if (!currentFlowWeekly) return;
+  flowWeeklyPdfBtn.disabled = true;
+
+  try {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const margin = 48;
+    let y = margin;
+
+    doc.setFontSize(16);
+    doc.setFont(undefined, 'bold');
+    doc.text(`${currentFlowWeekly.ticker} Weekly Flow Read`, margin, y);
+    y += 20;
+
+    doc.setFontSize(10);
+    doc.setFont(undefined, 'normal');
+    doc.setTextColor(100);
+    const [from, to] = currentFlowWeekly.date_range;
+    doc.text(
+      `${currentFlowWeekly.snapshot_count} days · ${new Date(from).toLocaleDateString()} to ${new Date(to).toLocaleDateString()}`,
+      margin, y
+    );
+    y += 24;
+    doc.setTextColor(0);
+
+    const canvas = document.getElementById('flowWeeklyChart');
+    const imgData = canvas.toDataURL('image/png', 1.0);
+    const imgWidth = pageWidth - margin * 2;
+    const imgHeight = (canvas.height / canvas.width) * imgWidth;
+    doc.addImage(imgData, 'PNG', margin, y, imgWidth, imgHeight);
+    y += imgHeight + 24;
+
+    doc.setFontSize(12);
+    doc.setFont(undefined, 'bold');
+    doc.text('Weekly Flow Analysis', margin, y);
+    y += 16;
+
+    doc.setFontSize(10.5);
+    doc.setFont(undefined, 'normal');
+    const lines = doc.splitTextToSize(currentFlowWeekly.analysis, pageWidth - margin * 2);
+    lines.forEach((line) => {
+      if (y > doc.internal.pageSize.getHeight() - margin) {
+        doc.addPage();
+        y = margin;
+      }
+      doc.text(line, margin, y);
+      y += 14;
+    });
+
+    doc.setFontSize(8);
+    doc.setTextColor(150);
+    doc.text(
+      'Generated from manually exported flow CSVs. Not financial advice.',
+      margin,
+      doc.internal.pageSize.getHeight() - 24
+    );
+
+    doc.save(`${currentFlowWeekly.ticker}_Weekly_Flow.pdf`);
+  } finally {
+    flowWeeklyPdfBtn.disabled = false;
+  }
+}
+
+flowTickerFilter.addEventListener('change', () => { renderFlowHistory(); flowWeeklyBox.style.display = 'none'; flowMonthlyBox.style.display = 'none'; });
+flowWeeklyBtn.addEventListener('click', generateWeeklyFlowRead);
+flowWeeklyPdfBtn.addEventListener('click', downloadWeeklyFlowPdf);
+flowMonthlyBtn.addEventListener('click', generateMonthlyFlowRead);
+flowMonthlyPdfBtn.addEventListener('click', downloadMonthlyFlowPdf);
+
+renderHistory();
+renderFlowHistory();
 </script>
+</body>
+</html>
