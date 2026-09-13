@@ -21,9 +21,17 @@ the same ticker, if available.
 
 Write a short end-of-day flow summary:
 
-- State the put/call premium skew plainly (e.g. "75% of today's premium
-  went into puts") and what that suggests about the session's overall
-  tone (defensive/hedging-heavy vs bullish-leaning)
+- Start with a one-line "Summary" label followed by a single sentence that
+  captures the whole day in one read - the skew direction and magnitude,
+  the aggression tone, and the overall conviction level, e.g. "Summary:
+  Decisively defensive session - heavy, aggressively-bought put flow with
+  no single dominant hedger, signaling broad-based downside positioning
+  rather than one large trade." This should let someone get the gist
+  without reading the rest.
+- Then the detailed paragraphs: state the put/call premium skew plainly
+  (e.g. "75% of today's premium went into puts") and what that suggests
+  about the session's overall tone (defensive/hedging-heavy vs
+  bullish-leaning)
 - State the aggression balance (aggressive buying vs aggressive selling)
   and what it implies about urgency and conviction, independent of the
   put/call skew - these two can tell different stories (e.g. put-heavy
@@ -41,9 +49,10 @@ Write a short end-of-day flow summary:
   today's flow is most worth watching in tomorrow's GEX read, and why -
   framed as an observation, never an instruction to trade
 
-Keep it to 3 short paragraphs maximum, plus the closing "Carryover watch"
-line. No headers except that one closing label, no bullet points, plain
-prose otherwise. This is not financial advice - describe what happened and
+Keep the "Summary" line to one sentence, then 3 short paragraphs maximum,
+plus the closing "Carryover watch" line. No headers except the "Summary"
+and "Carryover watch" labels, no bullet points, plain prose otherwise.
+This is not financial advice - describe what happened and
 what it implies structurally, never a recommended trade or position.`;
 
 export default async function handler(req, res) {
