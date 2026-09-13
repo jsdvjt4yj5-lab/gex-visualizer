@@ -24,10 +24,17 @@ other - not a description of any single day. Specifically:
   may not persist past it
 - If fewer than 2 usable snapshots are provided, say so plainly instead of
   fabricating a trend
+- Close with a short "Levels to watch" line: the level most likely to
+  matter into the week's expiration (pick whichever level shows the
+  clearest trend across the snapshots), what would CONFIRM the current
+  trajectory continuing, and what would INVALIDATE it. Frame as structural
+  observations, not instructions - never tell the reader to buy, sell, or
+  take a specific action.
 
-Keep it to 3 short paragraphs maximum. Plain prose, no bullet points, no
-headers. This is not financial advice - describe structure and change only,
-never phrase anything as a directive.`;
+Keep it to 3 short paragraphs maximum, plus the closing "Levels to watch"
+line. No headers except that one closing label, no bullet points otherwise.
+This is not financial advice - describe structure and change only, never
+phrase anything as a directive.`;
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {

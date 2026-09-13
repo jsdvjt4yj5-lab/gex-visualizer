@@ -129,6 +129,21 @@
 
 <div id="flowAnalysisBox" style="display:none; margin-top:16px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
 
+<div class="controls" style="margin-top:12px;">
+  <select id="flowTickerFilter"><option value="">All tickers</option></select>
+  <button id="flowWeeklyBtn" disabled>Generate weekly flow read</button>
+</div>
+<div id="flowHistoryList"></div>
+
+<div id="flowWeeklyBox" style="display:none; margin-top:16px;">
+  <h2 style="font-size:15px; color:#aaa;">Weekly flow read</h2>
+  <div id="flowWeeklyAnalysisText" style="padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+  <div id="flowWeeklyChartWrap" style="position:relative; height:0; margin-top:16px;">
+    <canvas id="flowWeeklyChart"></canvas>
+  </div>
+  <button id="flowWeeklyPdfBtn" style="margin-top:12px;">Download weekly flow PDF</button>
+</div>
+
 <hr style="border:none; border-top:1px solid #222; margin:32px 0 20px;" />
 
 <div class="history">
@@ -1045,6 +1060,7 @@ async function parseAndAnalyzeFlow() {
       currentFlowAnalysis = analysis;
       flowAnalysisBox.textContent = analysis;
       flowAnalysisBox.style.display = 'block';
+      saveFlowToHistory(stats, analysis);
     } else {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || 'Analysis request failed');
@@ -1126,7 +1142,229 @@ async function downloadFlowPdf() {
 flowParseBtn.addEventListener('click', parseAndAnalyzeFlow);
 flowPdfBtn.addEventListener('click', downloadFlowPdf);
 
+// ---------- Flow history + weekly flow comparison ----------
+
+const flowTickerFilter = document.getElementById('flowTickerFilter');
+const flowHistoryList = document.getElementById('flowHistoryList');
+const flowWeeklyBtn = document.getElementById('flowWeeklyBtn');
+const flowWeeklyBox = document.getElementById('flowWeeklyBox');
+const flowWeeklyAnalysisText = document.getElementById('flowWeeklyAnalysisText');
+const flowWeeklyChartWrap = document.getElementById('flowWeeklyChartWrap');
+const flowWeeklyPdfBtn = document.getElementById('flowWeeklyPdfBtn');
+
+let currentFlowWeekly = null;
+let flowWeeklyChartInstance = null;
+
+function saveFlowToHistory(stats, analysis) {
+  const key = 'flow_history';
+  const existing = JSON.parse(localStorage.getItem(key) || '[]');
+  existing.unshift({ ...stats, analysis });
+  localStorage.setItem(key, JSON.stringify(existing.slice(0, 50)));
+  renderFlowHistory();
+}
+
+function renderFlowHistory() {
+  const existing = JSON.parse(localStorage.getItem('flow_history') || '[]');
+  flowHistoryList.innerHTML = '';
+
+  const tickers = [...new Set(existing.map((i) => i.ticker))].sort();
+  const prevSelection = flowTickerFilter.value;
+  flowTickerFilter.innerHTML = '<option value="">All tickers</option>' +
+    tickers.map((t) => `<option value="${t}">${t}</option>`).join('');
+  flowTickerFilter.value = tickers.includes(prevSelection) ? prevSelection : '';
+
+  const filtered = flowTickerFilter.value
+    ? existing.filter((i) => i.ticker === flowTickerFilter.value)
+    : existing;
+
+  filtered.forEach((item) => {
+    const div = document.createElement('div');
+    div.className = 'history-item';
+    const when = new Date(item.captured_at).toLocaleString();
+    div.innerHTML = `<span>${item.ticker} · ${item.trade_count} trades · ${item.put_call_ratio_pct}% puts</span><span>${when}</span>`;
+    div.addEventListener('click', () => {
+      currentFlowStats = item;
+      currentFlowAnalysis = item.analysis || null;
+      showFlowSummary(item);
+      renderFlowChart(item);
+      if (currentFlowAnalysis) {
+        flowAnalysisBox.textContent = currentFlowAnalysis;
+        flowAnalysisBox.style.display = 'block';
+      } else {
+        flowAnalysisBox.style.display = 'none';
+      }
+      flowPdfBtn.disabled = false;
+    });
+    flowHistoryList.appendChild(div);
+  });
+
+  updateFlowWeeklyButtonState();
+}
+
+function updateFlowWeeklyButtonState() {
+  const eligible = getEligibleFlowSnapshotsForWeekly();
+  flowWeeklyBtn.disabled = eligible.length < 2;
+  flowWeeklyBtn.textContent = eligible.length < 2
+    ? 'Generate weekly flow read (need 2+ same-ticker days)'
+    : `Generate weekly flow read (${eligible.length} days)`;
+}
+
+function getEligibleFlowSnapshotsForWeekly() {
+  const existing = JSON.parse(localStorage.getItem('flow_history') || '[]');
+  const ticker = flowTickerFilter.value;
+  if (!ticker) return [];
+  return existing
+    .filter((s) => s.ticker === ticker)
+    .sort((a, b) => new Date(a.captured_at) - new Date(b.captured_at))
+    .slice(-7);
+}
+
+async function generateWeeklyFlowRead() {
+  const snapshots = getEligibleFlowSnapshotsForWeekly();
+  if (snapshots.length < 2) return;
+
+  flowWeeklyBtn.disabled = true;
+  setFlowStatus('Comparing daily flow snapshots...');
+
+  try {
+    const res = await fetch('/api/analyze-flow-weekly', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ snapshots }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Request failed (${res.status})`);
+    }
+
+    const data = await res.json();
+    currentFlowWeekly = data;
+    flowWeeklyAnalysisText.textContent = data.analysis;
+    renderFlowWeeklyChart(data);
+    flowWeeklyBox.style.display = 'block';
+    setFlowStatus(`Weekly flow read generated from ${data.snapshot_count} days.`);
+  } catch (err) {
+    setFlowStatus(err.message, true);
+  } finally {
+    updateFlowWeeklyButtonState();
+  }
+}
+
+function renderFlowWeeklyChart(data) {
+  const labels = data.put_call_trend.map((d) => new Date(d.captured_at).toLocaleDateString());
+  const values = data.put_call_trend.map((d) => d.put_call_ratio_pct);
+
+  flowWeeklyChartWrap.style.height = '260px';
+
+  if (flowWeeklyChartInstance) flowWeeklyChartInstance.destroy();
+
+  flowWeeklyChartInstance = new Chart(document.getElementById('flowWeeklyChart'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Put % of total premium',
+        data: values,
+        borderColor: '#e66767',
+        backgroundColor: 'rgba(230,103,103,0.15)',
+        fill: true,
+        tension: 0.2,
+        pointRadius: 4,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        title: {
+          display: true,
+          text: `${data.ticker} put % trend across ${data.snapshot_count} days`,
+          color: '#ccc',
+          font: { size: 12, weight: 'normal' },
+        },
+        tooltip: { callbacks: { label: (ctx) => `${ctx.raw.toFixed(1)}% puts` } },
+      },
+      scales: {
+        y: { min: 0, max: 100, grid: { color: 'rgba(150,150,150,0.15)' }, ticks: { color: '#999' } },
+        x: { grid: { display: false }, ticks: { color: '#999' } },
+      },
+    },
+  });
+}
+
+async function downloadWeeklyFlowPdf() {
+  if (!currentFlowWeekly) return;
+  flowWeeklyPdfBtn.disabled = true;
+
+  try {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const margin = 48;
+    let y = margin;
+
+    doc.setFontSize(16);
+    doc.setFont(undefined, 'bold');
+    doc.text(`${currentFlowWeekly.ticker} Weekly Flow Read`, margin, y);
+    y += 20;
+
+    doc.setFontSize(10);
+    doc.setFont(undefined, 'normal');
+    doc.setTextColor(100);
+    const [from, to] = currentFlowWeekly.date_range;
+    doc.text(
+      `${currentFlowWeekly.snapshot_count} days · ${new Date(from).toLocaleDateString()} to ${new Date(to).toLocaleDateString()}`,
+      margin, y
+    );
+    y += 24;
+    doc.setTextColor(0);
+
+    const canvas = document.getElementById('flowWeeklyChart');
+    const imgData = canvas.toDataURL('image/png', 1.0);
+    const imgWidth = pageWidth - margin * 2;
+    const imgHeight = (canvas.height / canvas.width) * imgWidth;
+    doc.addImage(imgData, 'PNG', margin, y, imgWidth, imgHeight);
+    y += imgHeight + 24;
+
+    doc.setFontSize(12);
+    doc.setFont(undefined, 'bold');
+    doc.text('Weekly Flow Analysis', margin, y);
+    y += 16;
+
+    doc.setFontSize(10.5);
+    doc.setFont(undefined, 'normal');
+    const lines = doc.splitTextToSize(currentFlowWeekly.analysis, pageWidth - margin * 2);
+    lines.forEach((line) => {
+      if (y > doc.internal.pageSize.getHeight() - margin) {
+        doc.addPage();
+        y = margin;
+      }
+      doc.text(line, margin, y);
+      y += 14;
+    });
+
+    doc.setFontSize(8);
+    doc.setTextColor(150);
+    doc.text(
+      'Generated from manually exported flow CSVs. Not financial advice.',
+      margin,
+      doc.internal.pageSize.getHeight() - 24
+    );
+
+    doc.save(`${currentFlowWeekly.ticker}_Weekly_Flow.pdf`);
+  } finally {
+    flowWeeklyPdfBtn.disabled = false;
+  }
+}
+
+flowTickerFilter.addEventListener('change', () => { renderFlowHistory(); flowWeeklyBox.style.display = 'none'; });
+flowWeeklyBtn.addEventListener('click', generateWeeklyFlowRead);
+flowWeeklyPdfBtn.addEventListener('click', downloadWeeklyFlowPdf);
+
 renderHistory();
+renderFlowHistory();
 </script>
 </body>
 </html>
