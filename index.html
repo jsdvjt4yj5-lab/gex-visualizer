@@ -444,6 +444,22 @@ document.getElementById('tigerPullBtn').addEventListener('click', pullFromTiger)
 async function processGexData(data) {
   currentData = data;
   renderChart(data);
+
+  let spotCorrectionNotice = document.getElementById('spotCorrectionNotice');
+  if (!spotCorrectionNotice) {
+    spotCorrectionNotice = document.createElement('div');
+    spotCorrectionNotice.id = 'spotCorrectionNotice';
+    spotCorrectionNotice.style.cssText = 'font-size:12.5px; color:#eda100; margin-bottom:8px; padding:6px 10px; background:rgba(237,161,0,0.1); border-radius:6px;';
+    chartWrap.parentNode.insertBefore(spotCorrectionNotice, chartWrap);
+  }
+
+  if (data.spot_price_corrected) {
+    spotCorrectionNotice.textContent = `⚠ Spot price looked misread from the screenshot (read as ${data.spot_price_raw}, inconsistent with the strike range) — auto-corrected to ${data.spot_price} based on the median strike. Verify against the source if this matters.`;
+    spotCorrectionNotice.style.display = 'block';
+  } else {
+    spotCorrectionNotice.style.display = 'none';
+  }
+
   setStatus('Fetching moving averages...');
 
   let movingAverages = null;

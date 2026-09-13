@@ -161,6 +161,24 @@ export default async function handler(req, res) {
       });
     }
 
+    // Sanity check: spot_price should fall reasonably close to the strike
+    // range shown (a GEX table is always screenshotted near-the-money).
+    // If it's wildly off, that's almost always a single-digit misread by
+    // the vision model (e.g. "764.48" read as "564.48") - correct it using
+    // the median strike rather than silently passing bad data downstream
+    // and hoping the analysis step notices and self-corrects.
+    if (typeof parsed.spot_price === 'number' && parsed.spot_price > 0) {
+      const strikes = parsed.levels.map((l) => l.strike).sort((a, b) => a - b);
+      const medianStrike = strikes[Math.floor(strikes.length / 2)];
+      const relativeDiff = Math.abs(parsed.spot_price - medianStrike) / medianStrike;
+
+      if (relativeDiff > 0.15) {
+        parsed.spot_price_raw = parsed.spot_price; // preserve what was read, for debugging
+        parsed.spot_price = medianStrike;
+        parsed.spot_price_corrected = true;
+      }
+    }
+
     // Flag the flip zone: the strike closest to spot where sign changes.
     const sorted = [...parsed.levels].sort((a, b) => b.strike - a.strike);
     for (let i = 0; i < sorted.length - 1; i++) {

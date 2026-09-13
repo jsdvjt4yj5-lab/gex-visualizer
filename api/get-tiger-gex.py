@@ -106,15 +106,35 @@ class handler(BaseHTTPRequestHandler):
                     b["is_flip_zone"] = True
                     break
 
+            # Sanity check: spot should sit reasonably close to the strike
+            # range fetched (this is Tiger's own chain, so a mismatch here
+            # usually means Yahoo returned a stale/wrong-ticker price
+            # rather than a parsing error, but the safeguard is worth
+            # having regardless).
+            spot_price_final = round(spot, 2)
+            spot_price_corrected = False
+            spot_price_raw = None
+            if levels:
+                strike_values = sorted(l["strike"] for l in levels)
+                median_strike = strike_values[len(strike_values) // 2]
+                relative_diff = abs(spot_price_final - median_strike) / median_strike
+                if relative_diff > 0.15:
+                    spot_price_raw = spot_price_final
+                    spot_price_final = median_strike
+                    spot_price_corrected = True
+
             response_body = {
                 "ticker": symbol,
-                "spot_price": round(spot, 2),
+                "spot_price": spot_price_final,
                 "expiration": nearest_expiry,
                 "levels": levels,
                 "captured_at": datetime.now(timezone.utc).isoformat(),
                 "read_type": read_type,
                 "source": "tiger",  # distinguishes this from screenshot-sourced data
             }
+            if spot_price_corrected:
+                response_body["spot_price_raw"] = spot_price_raw
+                response_body["spot_price_corrected"] = True
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
