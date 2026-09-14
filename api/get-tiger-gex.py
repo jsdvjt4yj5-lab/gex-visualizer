@@ -7,6 +7,15 @@
 # comparisons, PDF export) works identically regardless of which source
 # a given snapshot came from.
 #
+# AGGREGATES across every remaining trading day THIS WEEK (today through
+# this week's Friday) rather than using a single expiration - net GEX per
+# strike is summed across all of them. This also means an empty same-day
+# (0DTE) chain - a real Tiger API data quirk seen in testing - just
+# contributes zero rather than needing special-case handling: whichever
+# days in the week actually have data drive the result, and
+# `expirations_included` / `expirations_skipped_empty` in the response
+# show exactly which ones did.
+#
 # UNVALIDATED as of setup: Tiger's computed numbers have not yet been
 # compared against Bullflow's for the same ticker/moment. Treat this as
 # an experimental second source until that comparison happens on a real
@@ -22,7 +31,7 @@ from urllib.parse import urlparse, parse_qs
 import json
 import os
 import tempfile
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 
 from tigeropen.tiger_open_config import TigerOpenClientConfig
 from tigeropen.quote.quote_client import QuoteClient
@@ -63,31 +72,90 @@ class handler(BaseHTTPRequestHandler):
             quote_client = get_quote_client()
 
             expirations = quote_client.get_option_expirations(symbols=[symbol])
-            today_str = date.today().isoformat()
+            today = date.today()
+            today_str = today.isoformat()
             future = expirations[expirations["date"] >= today_str]
-            nearest_expiry = future.iloc[0]["date"]
 
-            chain = quote_client.get_option_chain(symbol, nearest_expiry)
+            if future.empty:
+                self.send_response(422)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "No upcoming expirations found for this symbol"}).encode())
+                return
+
+            # Aggregate across every remaining trading day THIS WEEK
+            # (today through this week's Friday), not just one expiration.
+            # This also naturally solves the earlier bug where a same-day
+            # 0DTE chain came back completely empty: that day just
+            # contributes zero to the sum instead of needing a guess about
+            # which single expiration to fall back to.
+            week_start = today - timedelta(days=today.weekday())  # this Monday
+            week_end = week_start + timedelta(days=6)              # this Sunday
+            this_week = future[
+                (future["date"] >= week_start.isoformat()) &
+                (future["date"] <= week_end.isoformat())
+            ]
+
+            if not this_week.empty:
+                expiries_to_fetch = this_week["date"].tolist()
+            else:
+                # Nothing left this week (e.g. running after Friday's
+                # close) - fall back to the single nearest upcoming one.
+                expiries_to_fetch = [future["date"].tolist()[0]]
 
             by_strike = {}
-            for _, row in chain.iterrows():
-                strike = row["strike"]
-                oi = row["open_interest"]
-                gamma = row["gamma"]
-                if strike not in by_strike:
-                    by_strike[strike] = 0.0
-                if oi is None or gamma is None:
-                    continue
-                try:
-                    oi = float(oi)
-                    gamma = float(gamma)
-                except (TypeError, ValueError):
-                    continue
-                contract_gex = gamma * oi * 100 * (spot ** 2) * 0.01
-                if row["put_call"] == "CALL":
-                    by_strike[strike] += contract_gex
-                elif row["put_call"] == "PUT":
-                    by_strike[strike] -= contract_gex
+            expiries_with_data = []
+            expiries_empty = []
+
+            for expiry in expiries_to_fetch:
+                chain = quote_client.get_option_chain(symbol, expiry)
+
+                day_had_data = False
+                for _, row in chain.iterrows():
+                    strike = row["strike"]
+                    oi = row["open_interest"]
+                    gamma = row["gamma"]
+                    if strike not in by_strike:
+                        by_strike[strike] = 0.0
+                    if oi is None or gamma is None:
+                        continue
+                    try:
+                        oi = float(oi)
+                        gamma = float(gamma)
+                    except (TypeError, ValueError):
+                        continue
+                    contract_gex = gamma * oi * 100 * (spot ** 2) * 0.01
+                    if abs(contract_gex) >= 1:  # ignore dust-level contributions when checking "had data"
+                        day_had_data = True
+                    if row["put_call"] == "CALL":
+                        by_strike[strike] += contract_gex
+                    elif row["put_call"] == "PUT":
+                        by_strike[strike] -= contract_gex
+
+                if day_had_data:
+                    expiries_with_data.append(expiry)
+                else:
+                    expiries_empty.append(expiry)
+
+            if not expiries_with_data:
+                # Every expiration this week came back empty - genuinely
+                # no data available right now (market closed), not
+                # something aggregation can fix.
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "ticker": symbol,
+                    "spot_price": round(spot, 2),
+                    "expiration": expiries_to_fetch[-1] if expiries_to_fetch else None,
+                    "levels": [],
+                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                    "read_type": read_type,
+                    "source": "tiger",
+                    "note": f"Checked {len(expiries_to_fetch)} expirations this week ({', '.join(expiries_to_fetch)}), all returned empty/zero data - likely market closed.",
+                }).encode())
+                return
 
             # Match parse-gex.js's output shape exactly: levels sorted
             # descending by strike, values in millions, flip zone flagged.
@@ -126,12 +194,15 @@ class handler(BaseHTTPRequestHandler):
             response_body = {
                 "ticker": symbol,
                 "spot_price": spot_price_final,
-                "expiration": nearest_expiry,
+                "expiration": expiries_with_data[-1],  # latest date actually contributing data, for display purposes
+                "expirations_included": expiries_with_data,  # full transparency on what got aggregated
                 "levels": levels,
                 "captured_at": datetime.now(timezone.utc).isoformat(),
                 "read_type": read_type,
                 "source": "tiger",  # distinguishes this from screenshot-sourced data
             }
+            if expiries_empty:
+                response_body["expirations_skipped_empty"] = expiries_empty
             if spot_price_corrected:
                 response_body["spot_price_raw"] = spot_price_raw
                 response_body["spot_price_corrected"] = True
