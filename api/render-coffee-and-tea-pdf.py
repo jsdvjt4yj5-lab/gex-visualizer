@@ -256,7 +256,59 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
-                                 TableStyle, HRFlowable, PageBreak)
+                                 TableStyle, HRFlowable, PageBreak, Image)
+import base64
+from io import BytesIO
+
+
+# ---------- gamma chart image (added: was text/tables only before) ----------
+
+def build_gamma_chart(S, image_b64):
+    """
+    Embeds the GEX bar chart (captured client-side from the same Chart.js
+    canvas the app already renders) into the PDF. Was missing entirely
+    before - the styled PDF had tables and narrative text but no visual.
+    Scales to fit the page width while preserving the chart's actual
+    aspect ratio (which varies with how many strikes are shown).
+    """
+    if not image_b64:
+        return
+    try:
+        # Strip a data: URL prefix if the frontend sent the full data URI
+        # rather than just the base64 payload.
+        if ',' in image_b64 and image_b64.strip().startswith('data:'):
+            image_b64 = image_b64.split(',', 1)[1]
+        image_bytes = base64.b64decode(image_b64)
+        img_buffer = BytesIO(image_bytes)
+
+        # Determine the chart's native size to preserve aspect ratio -
+        # reportlab's Image needs explicit width/height, it won't infer one
+        # from the other.
+        from PIL import Image as PILImage
+        pil_img = PILImage.open(BytesIO(image_bytes))
+        native_w, native_h = pil_img.size
+
+        max_width = 6.3 * inch
+        scale = max_width / native_w
+        display_w = max_width
+        display_h = native_h * scale
+
+        # Cap height too, in case of an unusually tall chart (many strikes) -
+        # scale down further if needed rather than letting it overrun the page.
+        max_height = 7.5 * inch
+        if display_h > max_height:
+            scale2 = max_height / display_h
+            display_h = max_height
+            display_w = display_w * scale2
+
+        S.append(Paragraph("Gamma Exposure Chart", H1))
+        S.append(Image(img_buffer, width=display_w, height=display_h))
+        S.append(Spacer(1, 8))
+    except Exception:
+        # If image embedding fails for any reason, skip it rather than
+        # breaking PDF generation entirely - the rest of the report still
+        # has real value without the chart image.
+        pass
 
 
 # ---------- shared styles ----------
@@ -459,7 +511,8 @@ def build_footer(S):
 # ---------- entry point ----------
 
 def generate_pdf(output: ReasoningOutput, session_date: str, expiration: str,
-                  portfolio_size: float, spot: float, out_path: str):
+                  portfolio_size: float, spot: float, out_path: str,
+                  gex_chart_image_b64: str = None):
     doc = SimpleDocTemplate(
         out_path, pagesize=letter,
         leftMargin=0.9*inch, rightMargin=0.9*inch,
@@ -467,6 +520,7 @@ def generate_pdf(output: ReasoningOutput, session_date: str, expiration: str,
     )
     S = []
     build_header(S, session_date, expiration, portfolio_size, spot)
+    build_gamma_chart(S, gex_chart_image_b64)
     build_market_structure(S, output.market_structure)
     build_macro_context(S, output.macro_context)
     build_vol_check(S, output.volatility_check)
@@ -541,6 +595,7 @@ class handler(BaseHTTPRequestHandler):
             expiration = body.get('expiration')
             portfolio_size = body.get('portfolio_size')
             spot = body.get('spot')
+            gex_chart_image = body.get('gex_chart_image')  # optional - PDF renders fine without it
 
             if not all([output_data, session_date, expiration, portfolio_size, spot]):
                 self._send_json_error(400, 'Missing one of: output, session_date, expiration, portfolio_size, spot')
@@ -562,6 +617,7 @@ class handler(BaseHTTPRequestHandler):
                 portfolio_size=float(portfolio_size),
                 spot=float(spot),
                 out_path=out_path,
+                gex_chart_image_b64=gex_chart_image,
             )
 
             with open(out_path, 'rb') as f:

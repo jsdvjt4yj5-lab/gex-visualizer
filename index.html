@@ -2002,7 +2002,12 @@ async function runCoffeeAndTea() {
     currentCtOutput = output;
     renderCtOutput(output);
     ctPdfBtn.disabled = false;
-    setCtStatus(`Session complete — ${output.strategies.length} strategies generated.`);
+    setCtStatus(`Session complete — ${output.strategies.length} strategies generated. Building PDF...`);
+
+    // Auto-generate the PDF right away, so pressing "Run Protocol Coffee
+    // and Tea" is the only click needed - the PDF button stays available
+    // afterward too, for re-downloading without re-running the AI call.
+    await downloadCoffeeAndTeaPdf();
   } catch (err) {
     setCtStatus(err.message, true);
   } finally {
@@ -2104,6 +2109,14 @@ async function downloadCoffeeAndTeaPdf() {
   setCtStatus('Rendering styled PDF...');
 
   try {
+    // Capture the already-rendered GEX chart canvas as a PNG, so the PDF
+    // includes the actual gamma visual, not just tables/text.
+    let chartImageB64 = null;
+    const gexCanvas = document.getElementById('gexChart');
+    if (gexCanvas && chartInstance) {
+      chartImageB64 = gexCanvas.toDataURL('image/png');
+    }
+
     const res = await fetch('/api/render-coffee-and-tea-pdf', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2113,6 +2126,7 @@ async function downloadCoffeeAndTeaPdf() {
         expiration: currentCtInput.expiration,
         portfolio_size: currentCtInput.portfolio_size_usd,
         spot: currentCtInput.gex_data.spot,
+        gex_chart_image: chartImageB64,
       }),
     });
 
