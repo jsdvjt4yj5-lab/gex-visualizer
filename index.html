@@ -100,6 +100,9 @@
   <canvas id="gexChart" role="img" aria-label="GEX by strike"></canvas>
 </div>
 
+<div class="controls" style="margin-top:8px;">
+  <button id="analyzeGexBtn" disabled>Generate GEX analysis</button>
+</div>
 <div id="analysisBox" style="display:none; margin-top:16px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
 
 <div id="vpChartWrap" style="position:relative; width:100%; height:0; margin-top:16px;">
@@ -238,6 +241,7 @@ const dropZone = document.getElementById('dropZone');
 const dropZoneLabel = document.getElementById('dropZoneLabel');
 const parseBtn = document.getElementById('parseBtn');
 const pdfBtn = document.getElementById('pdfBtn');
+const analyzeGexBtn = document.getElementById('analyzeGexBtn');
 const readTypeSelect = document.getElementById('readType');
 const statusEl = document.getElementById('status');
 const chartWrap = document.getElementById('chartWrap');
@@ -536,42 +540,68 @@ async function processGexData(data) {
     vpChartWrap.style.height = '0';
   }
 
+  saveToHistory(data);
+  pdfBtn.disabled = false;
+  if (typeof updateCtButtonState === 'function') updateCtButtonState();
+  const source = data.source === 'tiger' ? ' (Tiger live)' : '';
+  setStatus(`Parsed ${data.ticker} — ${data.expiration} (${data.levels.length} strikes)${source}`);
+  analyzeGexBtn.disabled = false;
+  analysisBox.style.display = 'none'; // clear any stale analysis from a prior snapshot
+}
+
+// Updates a saved history entry in place with analysis text generated
+// AFTER the snapshot was originally saved (since analysis is now a
+// separate, on-demand step rather than automatic).
+function updateHistoryEntryAnalysis(capturedAt, analysis) {
+  const existing = JSON.parse(localStorage.getItem('gex_history') || '[]');
+  const entry = existing.find((e) => e.captured_at === capturedAt);
+  if (entry) {
+    entry.analysis = analysis;
+    localStorage.setItem('gex_history', JSON.stringify(existing));
+  }
+}
+
+async function generateStandaloneGexAnalysis() {
+  if (!currentData) return;
+  analyzeGexBtn.disabled = true;
+  analysisBox.style.display = 'none';
   setStatus('Writing analysis...');
 
-  let analysisError = null;
+  const movingAverages = currentData.movingAverages || null;
+  const volumeProfileSummary = currentData.volumeProfile
+    ? {
+        symbol: currentData.volumeProfile.symbol,
+        lookback_days: currentData.volumeProfile.lookback_days,
+        poc: currentData.volumeProfile.poc,
+        value_area_low: currentData.volumeProfile.value_area_low,
+        value_area_high: currentData.volumeProfile.value_area_high,
+      }
+    : null;
+
   try {
     const analysisRes = await fetch(ANALYZE_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data, movingAverages, volumeProfile: volumeProfileSummary }),
+      body: JSON.stringify({ data: currentData, movingAverages, volumeProfile: volumeProfileSummary }),
     });
 
     if (analysisRes.ok) {
       const { analysis } = await analysisRes.json();
       currentAnalysis = analysis;
-      data.analysis = analysis;
+      currentData.analysis = analysis;
       analysisBox.textContent = analysis;
       analysisBox.style.display = 'block';
+      updateHistoryEntryAnalysis(currentData.captured_at, analysis);
+      setStatus(`Analysis generated for ${currentData.ticker} — ${currentData.expiration}.`);
     } else {
       const err = await analysisRes.json().catch(() => ({}));
-      analysisError = err.error || `Analysis request failed (${analysisRes.status})`;
-      currentAnalysis = null;
-      analysisBox.style.display = 'none';
+      throw new Error(err.error || `Analysis request failed (${analysisRes.status})`);
     }
-  } catch (e) {
-    analysisError = e.message;
+  } catch (err) {
     currentAnalysis = null;
-    analysisBox.style.display = 'none';
-  }
-
-  saveToHistory(data);
-  pdfBtn.disabled = false;
-  if (typeof updateCtButtonState === 'function') updateCtButtonState();
-  const source = data.source === 'tiger' ? ' (Tiger live)' : '';
-  if (analysisError) {
-    setStatus(`Parsed ${data.ticker} — ${data.expiration} (${data.levels.length} strikes)${source}. Analysis failed: ${analysisError}`, true);
-  } else {
-    setStatus(`Parsed ${data.ticker} — ${data.expiration} (${data.levels.length} strikes)${source}`);
+    setStatus(err.message, true);
+  } finally {
+    analyzeGexBtn.disabled = false;
   }
 }
 
@@ -757,6 +787,8 @@ function renderHistory() {
         analysisBox.style.display = 'none';
       }
       pdfBtn.disabled = false;
+      analyzeGexBtn.disabled = false;
+      if (typeof updateCtButtonState === 'function') updateCtButtonState();
     });
     historyList.appendChild(div);
   });
@@ -1101,6 +1133,7 @@ monthlyPdfBtn.addEventListener('click', downloadMonthlyPdf);
 
 parseBtn.addEventListener('click', parseAndVisualize);
 pdfBtn.addEventListener('click', downloadPdf);
+analyzeGexBtn.addEventListener('click', generateStandaloneGexAnalysis);
 
 // ---------- EOD Flow Analysis ----------
 
