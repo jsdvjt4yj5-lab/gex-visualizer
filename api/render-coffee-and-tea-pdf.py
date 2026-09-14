@@ -424,6 +424,25 @@ def build_flow_context(S, fc):
     S.append(Spacer(1, 4))
 
 
+def build_standalone_flow_analysis(S, text):
+    """
+    The separate, full-prose EOD Flow Analysis (from the app's standalone
+    Flow Analyst feature, generated from the raw Bullflow Collections CSV)
+    - distinct from build_flow_context above, which is Coffee and Tea's
+    own condensed cross-reference derived from the same underlying
+    flow_data. Both are useful: this one is the fuller independent read,
+    the other integrates it directly against the GEX walls. Only appears
+    if a standalone flow analysis was actually generated in this session.
+    """
+    if not text:
+        return
+    S.append(Paragraph("1d. EOD Flow Analysis (full)", H1))
+    for paragraph in text.split("\n\n"):
+        if paragraph.strip():
+            S.append(Paragraph(paragraph.strip(), BODY))
+    S.append(Spacer(1, 4))
+
+
 def build_thesis(S, thesis):
     S.append(Paragraph("2. Trade Thesis", H1))
     S.append(Paragraph(f"<b>Base case:</b> {thesis.base_case}", BULLET, bulletText='\u2022'))
@@ -512,7 +531,7 @@ def build_footer(S):
 
 def generate_pdf(output: ReasoningOutput, session_date: str, expiration: str,
                   portfolio_size: float, spot: float, out_path: str,
-                  gex_chart_image_b64: str = None):
+                  gex_chart_image_b64: str = None, flow_analysis_text: str = None):
     doc = SimpleDocTemplate(
         out_path, pagesize=letter,
         leftMargin=0.9*inch, rightMargin=0.9*inch,
@@ -525,6 +544,7 @@ def generate_pdf(output: ReasoningOutput, session_date: str, expiration: str,
     build_macro_context(S, output.macro_context)
     build_vol_check(S, output.volatility_check)
     build_flow_context(S, output.eod_flow_context)
+    build_standalone_flow_analysis(S, flow_analysis_text)
     build_thesis(S, output.trade_thesis)
     build_strategy_comparison(S, output.strategies)
     build_sizing(S, output.strategies)
@@ -596,6 +616,7 @@ class handler(BaseHTTPRequestHandler):
             portfolio_size = body.get('portfolio_size')
             spot = body.get('spot')
             gex_chart_image = body.get('gex_chart_image')  # optional - PDF renders fine without it
+            flow_analysis_text = body.get('flow_analysis_text')  # optional - standalone Flow Analyst prose
 
             if not all([output_data, session_date, expiration, portfolio_size, spot]):
                 self._send_json_error(400, 'Missing one of: output, session_date, expiration, portfolio_size, spot')
@@ -618,6 +639,7 @@ class handler(BaseHTTPRequestHandler):
                 spot=float(spot),
                 out_path=out_path,
                 gex_chart_image_b64=gex_chart_image,
+                flow_analysis_text=flow_analysis_text,
             )
 
             with open(out_path, 'rb') as f:
