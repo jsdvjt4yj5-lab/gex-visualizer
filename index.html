@@ -166,8 +166,9 @@
   Runs automatically once you parse a screenshot or pull from Tiger above
   - no separate click needed. Full session writeup: market structure,
   macro context, vol check, EOD flow context, trade thesis, sized
-  defined-risk strategies (POP-ranked), and day-over-day comparison, with
-  the gamma chart embedded, delivered straight to a downloaded PDF. Set
+  defined-risk strategies (POP-ranked), and day-over-day comparison,
+  delivered as its own separate PDF (not combined with the plain GEX
+  chart PDF or the EOD Flow Analysis PDF). Set
   portfolio size, assumed IV, and any macro events below <em>before</em>
   parsing/pulling if you want them reflected in that first automatic run
   - or use "Re-run" after changing them.
@@ -2060,14 +2061,6 @@ async function downloadCoffeeAndTeaPdf() {
   setCtStatus('Rendering styled PDF...');
 
   try {
-    // Capture the already-rendered GEX chart canvas as a PNG, so the PDF
-    // includes the actual gamma visual, not just tables/text.
-    let chartImageB64 = null;
-    const gexCanvas = document.getElementById('gexChart');
-    if (gexCanvas && chartInstance) {
-      chartImageB64 = gexCanvas.toDataURL('image/png');
-    }
-
     const res = await fetch('/api/render-coffee-and-tea-pdf', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2077,8 +2070,6 @@ async function downloadCoffeeAndTeaPdf() {
         expiration: currentCtInput.expiration,
         portfolio_size: currentCtInput.portfolio_size_usd,
         spot: currentCtInput.gex_data.spot,
-        gex_chart_image: chartImageB64,
-        flow_analysis_text: currentFlowAnalysis || null,
       }),
     });
 

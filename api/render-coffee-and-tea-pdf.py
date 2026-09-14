@@ -532,8 +532,7 @@ def build_footer(S):
 # ---------- entry point ----------
 
 def generate_pdf(output: ReasoningOutput, session_date: str, expiration: str,
-                  portfolio_size: float, spot: float, out_path: str,
-                  gex_chart_image_b64: str = None, flow_analysis_text: str = None):
+                  portfolio_size: float, spot: float, out_path: str):
     doc = SimpleDocTemplate(
         out_path, pagesize=letter,
         leftMargin=0.9*inch, rightMargin=0.9*inch,
@@ -541,12 +540,10 @@ def generate_pdf(output: ReasoningOutput, session_date: str, expiration: str,
     )
     S = []
     build_header(S, session_date, expiration, portfolio_size, spot)
-    build_gamma_chart(S, gex_chart_image_b64)
     build_market_structure(S, output.market_structure)
     build_macro_context(S, output.macro_context)
     build_vol_check(S, output.volatility_check)
     build_flow_context(S, output.eod_flow_context)
-    build_standalone_flow_analysis(S, flow_analysis_text)
     build_thesis(S, output.trade_thesis)
     build_strategy_comparison(S, output.strategies)
     build_sizing(S, output.strategies)
@@ -617,8 +614,6 @@ class handler(BaseHTTPRequestHandler):
             expiration = body.get('expiration')
             portfolio_size = body.get('portfolio_size')
             spot = body.get('spot')
-            gex_chart_image = body.get('gex_chart_image')  # optional - PDF renders fine without it
-            flow_analysis_text = body.get('flow_analysis_text')  # optional - standalone Flow Analyst prose
 
             if not all([output_data, session_date, expiration, portfolio_size, spot]):
                 self._send_json_error(400, 'Missing one of: output, session_date, expiration, portfolio_size, spot')
@@ -640,8 +635,6 @@ class handler(BaseHTTPRequestHandler):
                 portfolio_size=float(portfolio_size),
                 spot=float(spot),
                 out_path=out_path,
-                gex_chart_image_b64=gex_chart_image,
-                flow_analysis_text=flow_analysis_text,
             )
 
             with open(out_path, 'rb') as f:

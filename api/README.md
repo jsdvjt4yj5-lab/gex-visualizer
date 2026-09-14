@@ -135,9 +135,10 @@ project. Test this button during active trading hours.
 
 15. **Protocol Coffee and Tea** (`server/api/coffee-and-tea.js`) — a full
     trading-session reasoning layer, imported from a workflow spec
-    developed in a separate conversation. Takes whatever GEX data is
-    currently loaded (screenshot or Tiger pull, either source works since
-    both produce the same shape) plus the most recent EOD flow analysis,
+    developed in a separate conversation. **Runs automatically** as soon
+    as a GEX screenshot is parsed or a Tiger pull completes - there is no
+    separate manual step. Takes the just-loaded GEX data plus the most
+    recent EOD flow analysis,
     the prior day's saved snapshot (pulled from `gex_history` in
     localStorage - stateless by design, no server-side database), a
     portfolio size, an assumed IV, and manually-entered macro events, and
@@ -169,13 +170,11 @@ project. Test this button during active trading hours.
     a plain approximation. Validates the reasoning layer's output through
     the real pydantic `ReasoningOutput` schema before rendering - a
     second, stricter check on top of the JS validation already in
-    `coffee-and-tea.js`.
-    - **Includes the actual gamma exposure chart image**, not just tables
-      and narrative text — the frontend captures the already-rendered GEX
-      chart canvas as a PNG and sends it alongside the reasoning output;
-      the backend embeds it via reportlab's `Image` flowable, scaled to
-      fit the page while preserving its aspect ratio. Requires `Pillow`
-      (added to `requirements.txt`) to read the image's native dimensions.
+    `coffee-and-tea.js`. **Produces its own separate PDF** - not combined
+    with the plain GEX chart PDF or the EOD Flow Analysis PDF (an earlier
+    version embedded the chart image and the standalone flow analysis
+    text into this same document; that was reverted back to three
+    separate PDFs per request).
     - **One-click flow**: clicking "Run Protocol Coffee and Tea" now
       automatically generates and downloads the PDF immediately after the
       reasoning call completes — no separate "Download session PDF" click
