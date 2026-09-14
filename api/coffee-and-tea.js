@@ -128,7 +128,10 @@ mechanics, not guarantees. Every strategy MUST be defined-risk - a
 response with any naked leg or missing max_loss_per_contract_usd will be
 rejected downstream.`;
 
-const OUTPUT_SCHEMA_NOTE = `Return ONLY a single JSON object with this exact top-level shape - no
+const OUTPUT_SCHEMA_NOTE = `Keep every text field concise - 1-2 sentences for summaries and
+guidance fields, not full paragraphs. This output has many nested sections and strategies;
+verbosity in any one field risks the whole response being cut off before it completes. Return
+ONLY a single JSON object with this exact top-level shape - no
 prose, no markdown fences, no commentary outside the JSON:
 
 {
@@ -193,7 +196,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 8000,
+        max_tokens: 16000,
         system: systemPrompt,
         messages: [
           { role: 'user', content: JSON.stringify(input, null, 2) },
@@ -210,6 +213,18 @@ export default async function handler(req, res) {
     const textBlock = result.content.find((b) => b.type === 'text');
     if (!textBlock) {
       return res.status(502).json({ error: 'No text content in model response' });
+    }
+
+    // Check for truncation FIRST - a response cut off by hitting max_tokens
+    // produces incomplete JSON that no amount of brace-matching can fix,
+    // and the resulting error message should say so plainly rather than
+    // the generic "invalid JSON" (which reads like a formatting bug, not
+    // a length-limit issue).
+    if (result.stop_reason === 'max_tokens') {
+      return res.status(502).json({
+        error: 'Response was cut off before completing (hit the token limit) - the requested output (multiple strategies + full narrative sections) exceeded max_tokens. Try again, or reduce scope (fewer macro events, shorter portfolio context) if this recurs.',
+        raw: textBlock.text,
+      });
     }
 
     let cleaned = textBlock.text.replace(/```json|```/g, '').trim();
