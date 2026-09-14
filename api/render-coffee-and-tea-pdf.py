@@ -569,7 +569,7 @@ class handler(BaseHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/pdf')
-            self.send_header('Content-Disposition', f'attachment; filename="Coffee_and_Tea_{session_date}.pdf"')
+            self.send_header('Content-Disposition', f'attachment; filename="coffeeandteaprotocol_{session_date}.pdf"')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(pdf_bytes)

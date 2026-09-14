@@ -2122,7 +2122,7 @@ async function downloadCoffeeAndTeaPdf() {
     }
 
     const blob = await res.blob();
-    const filename = `${currentData.ticker}_Coffee_and_Tea_${currentCtInput.session_date}.pdf`;
+    const filename = `coffeeandteaprotocol_${currentCtInput.session_date}.pdf`;
 
     // Safari's download mechanism is asynchronous, unlike Chrome's - if we
     // revoke the blob URL immediately after clicking (as the original
