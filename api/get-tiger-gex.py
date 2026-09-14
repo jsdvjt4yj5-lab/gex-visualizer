@@ -79,11 +79,17 @@ from zoneinfo import ZoneInfo
 
 from tigeropen.tiger_open_config import TigerOpenClientConfig
 from tigeropen.quote.quote_client import QuoteClient
+from tigeropen.common.consts import Market
 
 EASTERN = ZoneInfo("America/New_York")
 
 DEFAULT_RISK_FREE_RATE = 0.043
 DEFAULT_DIVIDEND_YIELD = 0.012
+
+# Last-resort fallback if even get_option_analysis fails (e.g. rate limit,
+# transient error) - a rough, deliberately unremarkable SPY-ish vol level
+# so the calc still runs rather than returning nothing.
+HARD_FALLBACK_IV = 0.15
 
 # Floor time-to-expiry at 60 seconds so a same-day (0DTE) contract
 # right at/after market close doesn't divide by (near) zero. Gamma
@@ -154,6 +160,30 @@ def bs_gamma(spot, strike, t_years, sigma, risk_free_rate, dividend_yield):
     return math.exp(-dividend_yield * t_years) * pdf_d1 / (spot * sigma * sqrt_t)
 
 
+def get_underlying_iv(quote_client, symbol):
+    """Tiger's per-contract implied_vol field is coming back as 0.0 for
+    every row on the chain endpoint (confirmed in testing - not documented
+    by Tiger as a known gap). get_option_analysis still returns a real,
+    live 30-day aggregate IV for the underlying itself, so we use that as
+    a flat volatility input across the whole chain instead. This loses
+    strike-to-strike vol skew (real markets price OTM puts richer than
+    OTM calls) but is far better than the alternative of no usable vol
+    input at all. Falls back to HARD_FALLBACK_IV only if this call itself
+    fails (e.g. transient error/rate limit) - not expected in normal use.
+    Returns (iv_value, source_string) so callers can report which path was used.
+    """
+    try:
+        results = quote_client.get_option_analysis(symbols=[symbol], market=Market.US)
+        for item in results:
+            if getattr(item, "symbol", None) == symbol:
+                iv = getattr(item, "implied_vol_30_days", None)
+                if iv is not None and not math.isnan(iv) and iv > 0:
+                    return iv, "option_analysis_30d"
+    except Exception:
+        pass
+    return HARD_FALLBACK_IV, "hard_fallback"
+
+
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
@@ -166,6 +196,7 @@ class handler(BaseHTTPRequestHandler):
 
             spot = get_spot_price(symbol)
             quote_client = get_quote_client()
+            underlying_iv, underlying_iv_source = get_underlying_iv(quote_client, symbol)
 
             now_et = datetime.now(timezone.utc).astimezone(EASTERN)
             today = now_et.date()
@@ -207,11 +238,12 @@ class handler(BaseHTTPRequestHandler):
                 chain = quote_client.get_option_chain(symbol, expiry)
 
                 total_rows = len(chain)
-                skipped_missing = 0        # raw_strike/oi/iv was None
+                skipped_missing = 0        # raw_strike/oi was None (iv is no longer a skip reason - see fallback below)
                 skipped_nan = 0            # converted to float but was NaN
                 skipped_conversion_error = 0  # couldn't convert to float at all
-                skipped_gamma_failed = 0   # converted fine, but bs_gamma rejected the inputs (e.g. iv <= 0)
+                skipped_gamma_failed = 0   # converted fine, but bs_gamma rejected the inputs
                 used_rows = 0
+                used_fallback_iv_rows = 0  # rows where per-contract iv was unusable and underlying_iv was substituted
                 sample_rows = []  # a few raw (pre-conversion) values, for debugging
 
                 day_had_data = False
@@ -228,13 +260,15 @@ class handler(BaseHTTPRequestHandler):
                             "put_call": repr(row.get("put_call")),
                         })
 
-                    if raw_strike is None or oi is None or iv is None:
+                    if raw_strike is None or oi is None:
                         skipped_missing += 1
                         continue
                     try:
                         strike = float(raw_strike)
                         oi = float(oi)
-                        iv = float(iv)
+                        # iv may legitimately be None/missing on some rows -
+                        # that's fine now, it just means we fall back below.
+                        iv = float(iv) if iv is not None else 0.0
                     except (TypeError, ValueError):
                         skipped_conversion_error += 1
                         continue
@@ -247,6 +281,15 @@ class handler(BaseHTTPRequestHandler):
                     if math.isnan(strike) or math.isnan(oi) or math.isnan(iv):
                         skipped_nan += 1
                         continue
+
+                    # Tiger's per-contract implied_vol is coming back as 0.0
+                    # for every row in practice (confirmed in testing) - use
+                    # the underlying's aggregate IV as a flat fallback
+                    # whenever a contract's own IV isn't usable, rather than
+                    # dropping the contract entirely.
+                    if iv <= 0:
+                        iv = underlying_iv
+                        used_fallback_iv_rows += 1
 
                     if strike not in by_strike:
                         by_strike[strike] = 0.0
@@ -267,6 +310,7 @@ class handler(BaseHTTPRequestHandler):
                     "t_years": t_years,
                     "total_rows": total_rows,
                     "used_rows": used_rows,
+                    "used_fallback_iv_rows": used_fallback_iv_rows,
                     "skipped_missing": skipped_missing,
                     "skipped_nan": skipped_nan,
                     "skipped_conversion_error": skipped_conversion_error,
@@ -297,6 +341,8 @@ class handler(BaseHTTPRequestHandler):
                     "read_type": read_type,
                     "source": "tiger",
                     "note": f"Checked {len(expiries_to_fetch)} expirations this week ({', '.join(expiries_to_fetch)}), all returned no usable open_interest/implied_vol data.",
+                    "underlying_iv_used_as_fallback": underlying_iv,
+                    "underlying_iv_source": underlying_iv_source,
                     "diagnostics": diagnostics,
                 }).encode())
                 return
@@ -348,6 +394,9 @@ class handler(BaseHTTPRequestHandler):
                 "gamma_inputs": {
                     "risk_free_rate": risk_free_rate,
                     "dividend_yield": dividend_yield,
+                    "underlying_iv_used_as_fallback": underlying_iv,
+                    "underlying_iv_source": underlying_iv_source,  # "option_analysis_30d" (normal) or "hard_fallback" (Tiger call itself failed)
+                    "note": "Per-contract implied_vol from Tiger's chain endpoint is currently coming back as 0.0 for every row (confirmed in testing, undocumented by Tiger) - this flat underlying-level IV is substituted whenever that happens. This loses strike-to-strike vol skew.",
                 },
                 "diagnostics": diagnostics,
             }
