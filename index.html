@@ -83,13 +83,13 @@
     <option value="daily">Daily read</option>
     <option value="weekly">Weekly read</option>
   </select>
-  <button id="parseBtn" disabled>Parse & Run Protocol</button>
+  <button id="parseBtn" disabled>Parse and visualize</button>
   <button id="pdfBtn" disabled>Download PDF</button>
 </div>
 
 <div class="controls" style="margin-top:0;">
   <input type="text" id="tigerTickerInput" value="SPY" style="background:#1a1a1a; color:#eee; border:1px solid #333; border-radius:6px; padding:8px 12px; width:80px;" />
-  <button id="tigerPullBtn">Pull from Tiger & Run Protocol (experimental)</button>
+  <button id="tigerPullBtn">Pull from Tiger (experimental)</button>
 </div>
 
 <div class="status" id="status"></div>
@@ -100,6 +100,9 @@
   <canvas id="gexChart" role="img" aria-label="GEX by strike"></canvas>
 </div>
 
+<div class="controls" style="margin-top:8px;">
+  <button id="analyzeGexBtn" disabled>Generate GEX analysis</button>
+</div>
 <div id="analysisBox" style="display:none; margin-top:16px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
 
 <div id="vpChartWrap" style="position:relative; width:100%; height:0; margin-top:16px;">
@@ -163,15 +166,12 @@
 
 <h2 style="font-size:15px; color:#aaa;">Protocol Coffee and Tea</h2>
 <p style="font-size:13px; color:#999; margin-top:4px;">
-  Runs automatically once you parse a screenshot or pull from Tiger above
-  - no separate click needed. Full session writeup: market structure,
-  macro context, vol check, EOD flow context, trade thesis, sized
-  defined-risk strategies (POP-ranked), and day-over-day comparison,
-  delivered as its own separate PDF (not combined with the plain GEX
-  chart PDF or the EOD Flow Analysis PDF). Set
-  portfolio size, assumed IV, and any macro events below <em>before</em>
-  parsing/pulling if you want them reflected in that first automatic run
-  - or use "Re-run" after changing them.
+  Its own separate protocol, run manually - click the button below once
+  GEX data is loaded above (screenshot or Tiger pull). Full session
+  writeup: market structure, macro context, vol check, EOD flow context,
+  trade thesis, sized defined-risk strategies (POP-ranked), and
+  day-over-day comparison, delivered as its own separate PDF (not
+  combined with the plain GEX chart PDF or the EOD Flow Analysis PDF).
 </p>
 
 <div class="controls">
@@ -191,7 +191,7 @@
 </div>
 
 <div class="controls" style="margin-top:12px;">
-  <button id="ctRunBtn" disabled>Re-run Protocol Coffee and Tea</button>
+  <button id="ctRunBtn" disabled>Run Protocol Coffee and Tea</button>
   <button id="ctPdfBtn" disabled>Download session PDF</button>
 </div>
 
@@ -233,8 +233,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script>
 const PARSE_ENDPOINT = '/api/parse-gex'; // adjust if hosted elsewhere
-// (removed) ANALYZE_ENDPOINT was only used by the standalone GEX analysis
-// feature, superseded by Protocol Coffee and Tea.
+const ANALYZE_ENDPOINT = '/api/analyze-gex';
 const WEEKLY_ENDPOINT = '/api/analyze-gex-period';
 const MA_ENDPOINT = '/api/get-ma';
 const VOLUME_PROFILE_ENDPOINT = '/api/get-volume-profile';
@@ -243,6 +242,7 @@ const dropZone = document.getElementById('dropZone');
 const dropZoneLabel = document.getElementById('dropZoneLabel');
 const parseBtn = document.getElementById('parseBtn');
 const pdfBtn = document.getElementById('pdfBtn');
+const analyzeGexBtn = document.getElementById('analyzeGexBtn');
 const readTypeSelect = document.getElementById('readType');
 const statusEl = document.getElementById('status');
 const chartWrap = document.getElementById('chartWrap');
@@ -545,15 +545,64 @@ async function processGexData(data) {
   pdfBtn.disabled = false;
   if (typeof updateCtButtonState === 'function') updateCtButtonState();
   const source = data.source === 'tiger' ? ' (Tiger live)' : '';
-  setStatus(`Parsed ${data.ticker} — ${data.expiration} (${data.levels.length} strikes)${source}. Running Protocol Coffee and Tea...`);
+  setStatus(`Parsed ${data.ticker} — ${data.expiration} (${data.levels.length} strikes)${source}`);
+  analyzeGexBtn.disabled = false;
+  analysisBox.style.display = 'none'; // clear any stale analysis from a prior snapshot
+}
 
-  // Auto-run the full protocol right after parsing/pulling completes -
-  // one button press (either the screenshot path or the Tiger pull)
-  // takes you all the way to the finished PDF, no separate manual step.
-  // runCoffeeAndTea() itself already auto-triggers the PDF download once
-  // the reasoning call finishes, so this one call covers the whole chain.
-  if (typeof runCoffeeAndTea === 'function') {
-    await runCoffeeAndTea();
+// Updates a saved history entry in place with analysis text generated
+// AFTER the snapshot was originally saved (since analysis is a separate,
+// on-demand step rather than automatic).
+function updateHistoryEntryAnalysis(capturedAt, analysis) {
+  const existing = JSON.parse(localStorage.getItem('gex_history') || '[]');
+  const entry = existing.find((e) => e.captured_at === capturedAt);
+  if (entry) {
+    entry.analysis = analysis;
+    localStorage.setItem('gex_history', JSON.stringify(existing));
+  }
+}
+
+async function generateStandaloneGexAnalysis() {
+  if (!currentData) return;
+  analyzeGexBtn.disabled = true;
+  analysisBox.style.display = 'none';
+  setStatus('Writing analysis...');
+
+  const movingAverages = currentData.movingAverages || null;
+  const volumeProfileSummary = currentData.volumeProfile
+    ? {
+        symbol: currentData.volumeProfile.symbol,
+        lookback_days: currentData.volumeProfile.lookback_days,
+        poc: currentData.volumeProfile.poc,
+        value_area_low: currentData.volumeProfile.value_area_low,
+        value_area_high: currentData.volumeProfile.value_area_high,
+      }
+    : null;
+
+  try {
+    const analysisRes = await fetch(ANALYZE_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: currentData, movingAverages, volumeProfile: volumeProfileSummary }),
+    });
+
+    if (analysisRes.ok) {
+      const { analysis } = await analysisRes.json();
+      currentAnalysis = analysis;
+      currentData.analysis = analysis;
+      analysisBox.textContent = analysis;
+      analysisBox.style.display = 'block';
+      updateHistoryEntryAnalysis(currentData.captured_at, analysis);
+      setStatus(`Analysis generated for ${currentData.ticker} — ${currentData.expiration}.`);
+    } else {
+      const err = await analysisRes.json().catch(() => ({}));
+      throw new Error(err.error || `Analysis request failed (${analysisRes.status})`);
+    }
+  } catch (err) {
+    currentAnalysis = null;
+    setStatus(err.message, true);
+  } finally {
+    analyzeGexBtn.disabled = false;
   }
 }
 
@@ -739,6 +788,7 @@ function renderHistory() {
         analysisBox.style.display = 'none';
       }
       pdfBtn.disabled = false;
+      analyzeGexBtn.disabled = false;
       if (typeof updateCtButtonState === 'function') updateCtButtonState();
     });
     historyList.appendChild(div);
@@ -1084,8 +1134,7 @@ monthlyPdfBtn.addEventListener('click', downloadMonthlyPdf);
 
 parseBtn.addEventListener('click', parseAndVisualize);
 pdfBtn.addEventListener('click', downloadPdf);
-// (removed) analyzeGexBtn listener - standalone GEX analysis was replaced
-// by Protocol Coffee and Tea.
+analyzeGexBtn.addEventListener('click', generateStandaloneGexAnalysis);
 
 // ---------- EOD Flow Analysis ----------
 
