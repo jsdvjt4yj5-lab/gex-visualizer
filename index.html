@@ -693,13 +693,26 @@ async function downloadPdf() {
 }
 
 function renderChart(data) {
-  const labels = data.levels.map((l) => '$' + l.strike);
-  const values = data.levels.map((l) => l.net_gex_millions);
-  const colors = data.levels.map((l) =>
+  // Only show strikes within +/-8% of spot - the full aggregated chain
+  // spans a much wider range (e.g. $300-$825 for SPY), and strikes that
+  // far OTM have near-zero GEX, so plotting all of them just buries the
+  // meaningful near-the-money bars in a long list of invisible ticks.
+  const spot = data.spot_price;
+  const band = 0.08;
+  let plotLevels = data.levels.filter(
+    (l) => l.strike >= spot * (1 - band) && l.strike <= spot * (1 + band)
+  );
+  // Fallback: if nothing falls in that band (e.g. very sparse chain),
+  // show everything rather than rendering a blank chart.
+  if (plotLevels.length === 0) plotLevels = data.levels;
+
+  const labels = plotLevels.map((l) => '$' + l.strike);
+  const values = plotLevels.map((l) => l.net_gex_millions);
+  const colors = plotLevels.map((l) =>
     l.is_flip_zone ? '#eda100' : l.net_gex_millions >= 0 ? '#199e70' : '#e66767'
   );
 
-  chartWrap.style.height = Math.max(300, data.levels.length * 32 + 80) + 'px';
+  chartWrap.style.height = Math.max(300, plotLevels.length * 32 + 80) + 'px';
 
   if (chartInstance) chartInstance.destroy();
 
