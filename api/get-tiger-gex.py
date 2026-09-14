@@ -207,18 +207,19 @@ class handler(BaseHTTPRequestHandler):
 
                 day_had_data = False
                 for _, row in chain.iterrows():
-                    strike = row["strike"]
+                    raw_strike = row["strike"]
                     oi = row["open_interest"]
                     iv = row["implied_vol"]
-                    if strike not in by_strike:
-                        by_strike[strike] = 0.0
-                    if oi is None or iv is None:
+                    if raw_strike is None or oi is None or iv is None:
                         continue
                     try:
+                        strike = float(raw_strike)
                         oi = float(oi)
                         iv = float(iv)
                     except (TypeError, ValueError):
                         continue
+                    if strike not in by_strike:
+                        by_strike[strike] = 0.0
                     gamma = bs_gamma(spot, strike, t_years, iv, risk_free_rate, dividend_yield)
                     if gamma is None:
                         continue
