@@ -46,8 +46,8 @@ structures - NEVER a naked short strike:
 - Long Call Vertical (expect upside breakout): long call near resistance + short call further above
 - Long Put Vertical (expect downside breakout): long put near support + short put further below
 - Long Strangle (violent break either direction): long call + long put, both OTM
-Generate 3-5 of the most relevant structures given the actual market
-structure read, not all nine every time.
+Generate exactly 3 of the most relevant structures given the actual market
+structure read, not more - this keeps the total response length reliable.
 
 4. Position sizing: default risk budget is 5% of portfolio_size_usd = max
 loss per structure. contracts = floor(risk_budget / max_loss_per_contract).
@@ -128,9 +128,13 @@ mechanics, not guarantees. Every strategy MUST be defined-risk - a
 response with any naked leg or missing max_loss_per_contract_usd will be
 rejected downstream.`;
 
-const OUTPUT_SCHEMA_NOTE = `Keep every text field concise - 1-2 sentences for summaries and
-guidance fields, not full paragraphs. This output has many nested sections and strategies;
-verbosity in any one field risks the whole response being cut off before it completes. Return
+const OUTPUT_SCHEMA_NOTE = `Keep every text field short - hard limits, not suggestions:
+- "summary", "why_it_matters", "session_summary", "base_case", "est_path", "strategy_tilt": 25 words max each
+- "significance", "detail", "guidance", "structural_trigger", "entry_trigger", "condition", "why", "delta_note", "tension_or_alignment_note": 15 words max each
+These are real limits because this output has many nested sections and exactly
+3 full strategies - verbosity in any one field risks the whole response being
+cut off before it completes, which fails the entire session. A shorter,
+complete response is always better than a longer one that gets cut off. Return
 ONLY a single JSON object with this exact top-level shape - no
 prose, no markdown fences, no commentary outside the JSON:
 
@@ -196,7 +200,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 16000,
+        max_tokens: 32000,
         system: systemPrompt,
         messages: [
           { role: 'user', content: JSON.stringify(input, null, 2) },
