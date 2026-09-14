@@ -233,7 +233,7 @@
 <script>
 const PARSE_ENDPOINT = '/api/parse-gex'; // adjust if hosted elsewhere
 const ANALYZE_ENDPOINT = '/api/analyze-gex';
-const WEEKLY_ENDPOINT = '/api/analyze-weekly';
+const WEEKLY_ENDPOINT = '/api/analyze-gex-period';
 const MA_ENDPOINT = '/api/get-ma';
 const VOLUME_PROFILE_ENDPOINT = '/api/get-volume-profile';
 const fileInput = document.getElementById('fileInput');
@@ -848,10 +848,10 @@ async function generateMonthlyRead() {
   setStatus('Building monthly regime read...');
 
   try {
-    const res = await fetch('/api/analyze-monthly', {
+    const res = await fetch('/api/analyze-gex-period', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ snapshots }),
+      body: JSON.stringify({ period: 'monthly', snapshots }),
     });
 
     if (!res.ok) {
@@ -986,7 +986,7 @@ async function generateWeeklyRead() {
     const res = await fetch(WEEKLY_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ snapshots }),
+      body: JSON.stringify({ period: 'weekly', snapshots }),
     });
 
     if (!res.ok) {
@@ -1576,10 +1576,10 @@ async function generateMonthlyFlowRead() {
   setFlowStatus('Building monthly flow regime read...');
 
   try {
-    const res = await fetch('/api/analyze-flow-monthly', {
+    const res = await fetch('/api/analyze-flow-period', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ snapshots }),
+      body: JSON.stringify({ period: 'monthly', snapshots }),
     });
 
     if (!res.ok) {
@@ -1716,10 +1716,10 @@ async function generateWeeklyFlowRead() {
   setFlowStatus('Comparing daily flow snapshots...');
 
   try {
-    const res = await fetch('/api/analyze-flow-weekly', {
+    const res = await fetch('/api/analyze-flow-period', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ snapshots }),
+      body: JSON.stringify({ period: 'weekly', snapshots }),
     });
 
     if (!res.ok) {
