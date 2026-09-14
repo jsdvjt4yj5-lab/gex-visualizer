@@ -2122,16 +2122,34 @@ async function downloadCoffeeAndTeaPdf() {
     }
 
     const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${currentData.ticker}_Coffee_and_Tea_${currentCtInput.session_date}.pdf`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    const filename = `${currentData.ticker}_Coffee_and_Tea_${currentCtInput.session_date}.pdf`;
 
-    setCtStatus('PDF downloaded.');
+    // Safari's download mechanism is asynchronous, unlike Chrome's - if we
+    // revoke the blob URL immediately after clicking (as the original
+    // version did), Safari can lose the data before it finishes fetching
+    // it, producing a broken/empty file or silently failing. Also, Safari
+    // frequently ignores the `download` attribute on blob: URLs for PDFs
+    // specifically and opens them inline in its own viewer instead of
+    // downloading - not something we can fully force from JS, but
+    // window.open() is the more reliable path for that browser's actual
+    // behavior, letting the user manually save from Safari's PDF viewer.
+    const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+    const url = URL.createObjectURL(blob);
+
+    if (isSafari) {
+      window.open(url, '_blank');
+      setCtStatus('PDF opened in a new tab (Safari) - use Share/Save from there to download it.');
+      setTimeout(() => URL.revokeObjectURL(url), 30000); // give Safari time to actually load it
+    } else {
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000); // delay, not immediate - see note above
+      setCtStatus('PDF downloaded.');
+    }
   } catch (err) {
     setCtStatus('PDF generation failed: ' + err.message, true);
   } finally {
