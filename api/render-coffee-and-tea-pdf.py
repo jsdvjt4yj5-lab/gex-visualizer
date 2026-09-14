@@ -71,7 +71,9 @@ class ReasoningInput(BaseModel):
 
 class KeyLevel(BaseModel):
     strike: float
-    type: str
+    type: str = "level"  # default rather than required - this is a
+    # cosmetic label, not a risk-defining field, so a missing value
+    # shouldn't fail the whole PDF the way a missing max_loss would
     gex_usd_m: Optional[float] = None
     significance: str
 

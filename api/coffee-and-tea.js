@@ -135,7 +135,7 @@ ONLY a single JSON object with this exact top-level shape - no
 prose, no markdown fences, no commentary outside the JSON:
 
 {
-  "market_structure": { "summary": string, "key_levels": [{"strike": number, "type": string, "gex_usd_m": number|null, "significance": string}] },
+  "market_structure": { "summary": string, "key_levels": [{"strike": number, "type": "wall"|"flip_zone"|"support"|"resistance"|"confluence", "gex_usd_m": number|null, "significance": string}] },
   "macro_context": { "key_catalyst": string, "why_it_matters": string, "per_strategy_guidance": [{"strategy_type": string, "guidance": string}] },
   "volatility_check": { "realized_vol_10d_pct": number, "realized_vol_20d_pct": number, "iv_used_pct": number, "iv_source": "placeholder"|"live_chain", "verdict": "rich"|"cheap"|"fair", "strategy_tilt": string },
   "eod_flow_context": { "session_summary": string, "wall_cross_references": [{"strike": number, "gex_confirms": boolean, "detail": string}], "standout_prints": [{"strike": number, "detail": string}], "tension_or_alignment_note": string } | null,
