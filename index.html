@@ -161,6 +161,42 @@
 
 <hr style="border:none; border-top:1px solid #222; margin:32px 0 20px;" />
 
+<h2 style="font-size:15px; color:#aaa;">Protocol Coffee and Tea</h2>
+<p style="font-size:13px; color:#999; margin-top:4px;">
+  Full session writeup: market structure, macro context, vol check, EOD
+  flow context, trade thesis, sized defined-risk strategies (POP-ranked),
+  and day-over-day comparison. Uses whatever GEX data is currently loaded
+  above (screenshot or Tiger pull) and the most recent EOD flow analysis,
+  if any.
+</p>
+
+<div class="controls">
+  <label style="font-size:13px; color:#999;">Portfolio $
+    <input type="number" id="ctPortfolioSize" value="30000" style="background:#1a1a1a; color:#eee; border:1px solid #333; border-radius:6px; padding:8px 12px; width:110px; margin-left:4px;" />
+  </label>
+  <label style="font-size:13px; color:#999;">Assumed IV %
+    <input type="number" id="ctAssumedIv" value="13" style="background:#1a1a1a; color:#eee; border:1px solid #333; border-radius:6px; padding:8px 12px; width:70px; margin-left:4px;" />
+  </label>
+</div>
+
+<div style="margin-top:8px;">
+  <label style="font-size:13px; color:#999; display:block; margin-bottom:4px;">
+    Macro events this window (one per line: Event Name | YYYY-MM-DD | HH:MM ET | detail)
+  </label>
+  <textarea id="ctMacroEvents" rows="3" style="width:100%; max-width:600px; background:#1a1a1a; color:#eee; border:1px solid #333; border-radius:6px; padding:8px 12px; font-family:inherit; font-size:13px;" placeholder="FOMC decision | 2026-09-16 | 14:00 | Rate decision + press conference 14:30 ET"></textarea>
+</div>
+
+<div class="controls" style="margin-top:12px;">
+  <button id="ctRunBtn" disabled>Run Protocol Coffee and Tea</button>
+  <button id="ctPdfBtn" disabled>Download session PDF</button>
+</div>
+
+<div class="status" id="ctStatus"></div>
+
+<div id="ctOutput" style="margin-top:16px;"></div>
+
+<hr style="border:none; border-top:1px solid #222; margin:32px 0 20px;" />
+
 <div class="history">
   <h2>History</h2>
   <div class="controls" style="margin-top:0;">
@@ -530,6 +566,7 @@ async function processGexData(data) {
 
   saveToHistory(data);
   pdfBtn.disabled = false;
+  if (typeof updateCtButtonState === 'function') updateCtButtonState();
   const source = data.source === 'tiger' ? ' (Tiger live)' : '';
   if (analysisError) {
     setStatus(`Parsed ${data.ticker} — ${data.expiration} (${data.levels.length} strikes)${source}. Analysis failed: ${analysisError}`, true);
@@ -1783,6 +1820,363 @@ flowWeeklyBtn.addEventListener('click', generateWeeklyFlowRead);
 flowWeeklyPdfBtn.addEventListener('click', downloadWeeklyFlowPdf);
 flowMonthlyBtn.addEventListener('click', generateMonthlyFlowRead);
 flowMonthlyPdfBtn.addEventListener('click', downloadMonthlyFlowPdf);
+
+// ---------- Protocol Coffee and Tea ----------
+
+const ctPortfolioSize = document.getElementById('ctPortfolioSize');
+const ctAssumedIv = document.getElementById('ctAssumedIv');
+const ctMacroEvents = document.getElementById('ctMacroEvents');
+const ctRunBtn = document.getElementById('ctRunBtn');
+const ctPdfBtn = document.getElementById('ctPdfBtn');
+const ctStatusEl = document.getElementById('ctStatus');
+const ctOutput = document.getElementById('ctOutput');
+
+let currentCtOutput = null;
+let currentCtInput = null;
+
+function setCtStatus(msg, isError = false) {
+  ctStatusEl.textContent = msg;
+  ctStatusEl.className = 'status' + (isError ? ' error' : '');
+}
+
+// Transforms currentData (the shape shared by screenshot parsing and the
+// Tiger pull - {ticker, spot_price, expiration, levels, movingAverages,
+// volumeProfile}) into the gex_data shape Protocol Coffee and Tea expects.
+function buildGexDataFromCurrent(data) {
+  const spot = data.spot_price;
+  const walls = data.levels
+    .filter((l) => Math.abs(l.net_gex_millions) >= 20) // only meaningful walls, not every strike
+    .map((l) => ({
+      strike: l.strike,
+      gex_usd_m: l.net_gex_millions,
+      side: l.strike >= spot ? 'above' : 'below',
+    }));
+  const hasFlipZone = data.levels.some((l) => l.is_flip_zone);
+
+  return {
+    spot,
+    poc: data.volumeProfile?.poc ?? null,
+    vah: data.volumeProfile?.value_area_high ?? null,
+    val: data.volumeProfile?.value_area_low ?? null,
+    ma30: data.movingAverages?.ma30 ?? null,
+    ma200: data.movingAverages?.ma200 ?? null,
+    walls,
+    gamma_regime: hasFlipZone ? 'flip_zone_present' : 'uniform_positive',
+  };
+}
+
+// Pulls the most recent SAVED snapshot for the same ticker from gex_history
+// that ISN'T the currently-loaded one, for day-over-day comparison.
+function buildPriorSnapshot(ticker) {
+  const existing = JSON.parse(localStorage.getItem('gex_history') || '[]');
+  const sameTicker = existing
+    .filter((s) => s.ticker === ticker)
+    .sort((a, b) => new Date(b.captured_at) - new Date(a.captured_at));
+  // Skip the first entry if it matches currentData's own captured_at (that's "today").
+  const prior = sameTicker.find((s) => !currentData || s.captured_at !== currentData.captured_at);
+  return prior ? buildGexDataFromCurrent(prior) : null;
+}
+
+// Transforms currentFlowStats (from the EOD Flow Analyst) into the
+// flow_data shape Protocol Coffee and Tea expects.
+function buildFlowDataFromCurrent(stats) {
+  if (!stats) return null;
+  return {
+    total_trades: stats.trade_count,
+    total_premium_usd_m: +(stats.total_premium / 1e6).toFixed(1),
+    put_pct: stats.put_call_ratio_pct,
+    call_pct: +(100 - stats.put_call_ratio_pct).toFixed(1),
+    aggressive_buy_usd_m: +(stats.aggressive_buy_premium / 1e6).toFixed(1),
+    aggressive_sell_usd_m: +(stats.aggressive_sell_premium / 1e6).toFixed(1),
+    sweep_usd_m: +(stats.sweep_premium / 1e6).toFixed(1),
+    block_usd_m: +(stats.block_premium / 1e6).toFixed(1),
+    top_conviction_trades: (stats.top_clusters || []).slice(0, 5).map((c) => ({
+      strike: c.strike,
+      type: c.optionType,
+      expiry: c.expiration,
+      score: c.maxScore,
+      trade_count: c.count,
+      premium_usd_m: +(c.premium / 1e6).toFixed(2),
+    })),
+  };
+}
+
+function parseMacroEvents(text) {
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const parts = line.split('|').map((p) => p.trim());
+      return {
+        event: parts[0] || 'Unnamed event',
+        date: parts[1] || '',
+        time_et: parts[2] || null,
+        detail: parts[3] || null,
+      };
+    });
+}
+
+function updateCtButtonState() {
+  ctRunBtn.disabled = !currentData;
+}
+
+async function runCoffeeAndTea() {
+  if (!currentData) return;
+  ctRunBtn.disabled = true;
+  ctOutput.innerHTML = '';
+  ctPdfBtn.disabled = true;
+  setCtStatus('Assembling session data...');
+
+  try {
+    const gexData = buildGexDataFromCurrent(currentData);
+    const priorSnapshot = buildPriorSnapshot(currentData.ticker);
+    const flowData = buildFlowDataFromCurrent(currentFlowStats);
+    const macroEvents = parseMacroEvents(ctMacroEvents.value);
+
+    // Fold the assumed IV and MA-derived realized vol into gex_data's
+    // companion fields the reasoning layer needs - passed as a sibling
+    // field rather than cramming into gex_data itself.
+    const input = {
+      session_date: new Date().toISOString().slice(0, 10),
+      expiration: currentData.expiration,
+      gex_data: gexData,
+      flow_data: flowData,
+      chain_data_available: currentData.source === 'tiger',
+      prior_snapshot: priorSnapshot,
+      portfolio_size_usd: parseFloat(ctPortfolioSize.value) || 30000,
+      macro_events_this_window: macroEvents,
+      assumed_iv_pct: parseFloat(ctAssumedIv.value) || 13,
+      realized_vol_10d_pct: currentData.movingAverages?.realized_vol_10d_pct ?? null,
+      realized_vol_20d_pct: currentData.movingAverages?.realized_vol_20d_pct ?? null,
+    };
+
+    currentCtInput = input;
+    setCtStatus('Running Protocol Coffee and Tea (this can take a bit longer than other reads)...');
+
+    const res = await fetch('/api/coffee-and-tea', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Request failed (${res.status})`);
+    }
+
+    const output = await res.json();
+    currentCtOutput = output;
+    renderCtOutput(output);
+    ctPdfBtn.disabled = false;
+    setCtStatus(`Session complete — ${output.strategies.length} strategies generated.`);
+  } catch (err) {
+    setCtStatus(err.message, true);
+  } finally {
+    ctRunBtn.disabled = false;
+  }
+}
+
+function ctSection(title, contentHtml) {
+  return `<div style="margin-top:16px;">
+    <h3 style="font-size:14px; color:#eda100; margin-bottom:6px;">${title}</h3>
+    <div style="font-size:13.5px; line-height:1.6; color:#ddd;">${contentHtml}</div>
+  </div>`;
+}
+
+function renderCtOutput(o) {
+  let html = '';
+
+  html += ctSection('Market Structure', `
+    <p>${o.market_structure.summary}</p>
+    <table style="border-collapse:collapse; font-size:12.5px; margin-top:6px;">
+      <tr><th style="padding:3px 8px; color:#999; text-align:left;">Strike</th><th style="padding:3px 8px; color:#999; text-align:left;">Type</th><th style="padding:3px 8px; color:#999; text-align:right;">GEX ($M)</th><th style="padding:3px 8px; color:#999; text-align:left;">Significance</th></tr>
+      ${o.market_structure.key_levels.map((k) => `<tr><td style="padding:3px 8px;">$${k.strike}</td><td style="padding:3px 8px;">${k.type}</td><td style="padding:3px 8px; text-align:right;">${k.gex_usd_m ?? '-'}</td><td style="padding:3px 8px;">${k.significance}</td></tr>`).join('')}
+    </table>
+  `);
+
+  html += ctSection('Macro Context', `
+    <p><strong>${o.macro_context.key_catalyst}</strong></p>
+    <p>${o.macro_context.why_it_matters}</p>
+    ${o.macro_context.per_strategy_guidance.map((g) => `<p style="margin-top:4px;"><em>${g.strategy_type}:</em> ${g.guidance}</p>`).join('')}
+  `);
+
+  const vc = o.volatility_check;
+  html += ctSection('Volatility Check', `
+    <p>10d RV: ${vc.realized_vol_10d_pct}% · 20d RV: ${vc.realized_vol_20d_pct}% · IV used: ${vc.iv_used_pct}% (${vc.iv_source})</p>
+    <p><strong style="color:${vc.verdict === 'rich' ? '#e66767' : vc.verdict === 'cheap' ? '#199e70' : '#eda100'};">${vc.verdict.toUpperCase()}</strong> — ${vc.strategy_tilt}</p>
+  `);
+
+  if (o.eod_flow_context) {
+    const fc = o.eod_flow_context;
+    html += ctSection('EOD Flow Context', `
+      <p>${fc.session_summary}</p>
+      ${fc.wall_cross_references.map((w) => `<p style="margin-top:4px;">$${w.strike}: ${w.gex_confirms ? '✓ confirms' : '✗ contradicts'} — ${w.detail}</p>`).join('')}
+      ${fc.standout_prints.map((p) => `<p style="margin-top:4px; color:#999;">Standout: $${p.strike} — ${p.detail}</p>`).join('')}
+      <p style="margin-top:6px;"><em>${fc.tension_or_alignment_note}</em></p>
+    `);
+  }
+
+  const t = o.trade_thesis;
+  html += ctSection('Trade Thesis', `
+    <p><strong>Base case:</strong> ${t.base_case}</p>
+    <p style="margin-top:4px;"><strong style="color:#199e70;">Upside break:</strong> ${t.upside_break.condition} → targets ${t.upside_break.target_levels.map((l) => '$' + l).join(', ')}</p>
+    <p style="margin-top:4px;"><strong style="color:#e66767;">Downside break:</strong> ${t.downside_break.condition} → targets ${t.downside_break.target_levels.map((l) => '$' + l).join(', ')}</p>
+  `);
+
+  const stratRows = o.strategies.map((s) => {
+    const legsStr = s.legs.map((l) => `${l.action} ${l.type} $${l.strike} (${l.expiry})`).join('; ');
+    const liqColor = { green: '#199e70', yellow: '#eda100', red: '#e66767', awaiting_live_chain: '#666' }[s.liquidity_check.status] || '#666';
+    return `<div style="margin-top:12px; padding:10px; background:#1a1a1a; border-radius:6px;">
+      <strong>${s.name}</strong> <span style="color:#999;">— ${s.view}</span>
+      <p style="margin-top:4px; font-size:12.5px; color:#ccc;">${legsStr}</p>
+      <p style="margin-top:4px; font-size:12.5px;">${s.pricing.credit_or_debit} $${s.pricing.amount_per_contract_usd}/contract · max loss $${s.pricing.max_loss_per_contract_usd} · max profit ${s.pricing.max_profit_per_contract_usd ?? 'uncapped'} <span style="color:#666;">(${s.pricing.pricing_source})</span></p>
+      <p style="margin-top:4px; font-size:12.5px;">Sizing: ${s.sizing.contracts} contracts (${s.sizing.risk_budget_pct}% risk budget) · total max loss $${s.sizing.total_max_loss_usd} · total max profit ${s.sizing.total_max_profit_usd ?? 'uncapped'}</p>
+      <p style="margin-top:4px; font-size:12.5px; color:#199e70;">50% profit target: $${s.profit_target_50pct.trigger_price_usd} (${s.profit_target_50pct.est_path})</p>
+      <p style="margin-top:4px; font-size:12.5px; color:#e66767;">Stop-loss: ${s.stop_loss.price_trigger_usd != null ? '$' + s.stop_loss.price_trigger_usd : 'monitor manually'} · structural: ${s.stop_loss.structural_trigger}</p>
+      <p style="margin-top:4px; font-size:12.5px;">POP: ${s.pop_pct != null ? s.pop_pct + '%' : 'n/a'} · Entry: ${s.entry_trigger}</p>
+      <p style="margin-top:4px; font-size:12px; color:${liqColor};">Liquidity: ${s.liquidity_check.status}${s.liquidity_check.detail ? ' — ' + s.liquidity_check.detail : ''}</p>
+    </div>`;
+  }).join('');
+
+  html += ctSection('Strategy Comparison', stratRows);
+
+  html += ctSection('Probability of Profit Ranking', `
+    <table style="border-collapse:collapse; font-size:12.5px;">
+      <tr><th style="padding:3px 8px; color:#999; text-align:left;">Rank</th><th style="padding:3px 8px; color:#999; text-align:left;">Strategy</th><th style="padding:3px 8px; color:#999; text-align:right;">POP</th><th style="padding:3px 8px; color:#999; text-align:left;">Why</th></tr>
+      ${o.pop_ranking.map((p) => `<tr><td style="padding:3px 8px;">${p.rank}</td><td style="padding:3px 8px;">${p.strategy_name}</td><td style="padding:3px 8px; text-align:right;">${p.pop_pct}%</td><td style="padding:3px 8px;">${p.why}</td></tr>`).join('')}
+    </table>
+  `);
+
+  if (o.day_over_day_comparison && o.day_over_day_comparison.has_prior_snapshot) {
+    const d = o.day_over_day_comparison;
+    html += ctSection('Day-over-Day Comparison', `
+      <table style="border-collapse:collapse; font-size:12.5px;">
+        <tr><th style="padding:3px 8px; color:#999; text-align:left;">Metric</th><th style="padding:3px 8px; color:#999; text-align:right;">Prior</th><th style="padding:3px 8px; color:#999; text-align:right;">Current</th><th style="padding:3px 8px; color:#999; text-align:left;">Note</th></tr>
+        ${d.changes.map((c) => `<tr><td style="padding:3px 8px;">${c.metric}</td><td style="padding:3px 8px; text-align:right;">${c.prior ?? '-'}</td><td style="padding:3px 8px; text-align:right;">${c.current ?? '-'}</td><td style="padding:3px 8px;">${c.delta_note}</td></tr>`).join('')}
+      </table>
+    `);
+  } else {
+    html += ctSection('Day-over-Day Comparison', '<p style="color:#666;">No prior snapshot available for this ticker yet — comparison will appear once a second session is run.</p>');
+  }
+
+  html += `<p style="margin-top:16px; font-size:11px; color:#666;">All figures illustrative unless pricing_source is "live_chain". Not financial advice. GEX walls are dealer-hedging mechanics, not guarantees.</p>`;
+
+  ctOutput.innerHTML = html;
+}
+
+async function downloadCoffeeAndTeaPdf() {
+  if (!currentCtOutput) return;
+  ctPdfBtn.disabled = true;
+
+  try {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 48;
+    let y = margin;
+
+    const ensureSpace = (needed) => {
+      if (y + needed > pageHeight - margin) {
+        doc.addPage();
+        y = margin;
+      }
+    };
+
+    const writeParagraph = (text, size = 10) => {
+      doc.setFontSize(size);
+      const lines = doc.splitTextToSize(text, pageWidth - margin * 2);
+      lines.forEach((line) => {
+        ensureSpace(14);
+        doc.text(line, margin, y);
+        y += 14;
+      });
+    };
+
+    const writeHeading = (text) => {
+      ensureSpace(24);
+      doc.setFontSize(13);
+      doc.setFont(undefined, 'bold');
+      doc.setTextColor(20);
+      doc.text(text, margin, y);
+      doc.setFont(undefined, 'normal');
+      y += 18;
+    };
+
+    doc.setFontSize(17);
+    doc.setFont(undefined, 'bold');
+    doc.text(`Protocol Coffee and Tea — ${currentData.ticker}`, margin, y);
+    y += 22;
+
+    doc.setFontSize(10);
+    doc.setFont(undefined, 'normal');
+    doc.setTextColor(100);
+    doc.text(`${currentCtInput.session_date} · exp ${currentCtInput.expiration} · portfolio $${currentCtInput.portfolio_size_usd}`, margin, y);
+    y += 24;
+    doc.setTextColor(0);
+
+    const o = currentCtOutput;
+
+    writeHeading('Market Structure');
+    writeParagraph(o.market_structure.summary);
+    o.market_structure.key_levels.forEach((k) => writeParagraph(`  $${k.strike} (${k.type}, ${k.gex_usd_m ?? '-'}M): ${k.significance}`, 9));
+    y += 6;
+
+    writeHeading('Macro Context');
+    writeParagraph(`${o.macro_context.key_catalyst} — ${o.macro_context.why_it_matters}`);
+    y += 6;
+
+    writeHeading('Volatility Check');
+    writeParagraph(`10d RV ${o.volatility_check.realized_vol_10d_pct}% / 20d RV ${o.volatility_check.realized_vol_20d_pct}% vs IV ${o.volatility_check.iv_used_pct}% — ${o.volatility_check.verdict.toUpperCase()}: ${o.volatility_check.strategy_tilt}`);
+    y += 6;
+
+    if (o.eod_flow_context) {
+      writeHeading('EOD Flow Context');
+      writeParagraph(o.eod_flow_context.session_summary);
+      writeParagraph(o.eod_flow_context.tension_or_alignment_note, 9);
+      y += 6;
+    }
+
+    writeHeading('Trade Thesis');
+    writeParagraph(`Base case: ${o.trade_thesis.base_case}`);
+    writeParagraph(`Upside break: ${o.trade_thesis.upside_break.condition} -> ${o.trade_thesis.upside_break.target_levels.join(', ')}`, 9);
+    writeParagraph(`Downside break: ${o.trade_thesis.downside_break.condition} -> ${o.trade_thesis.downside_break.target_levels.join(', ')}`, 9);
+    y += 6;
+
+    writeHeading('Strategy Comparison');
+    o.strategies.forEach((s) => {
+      ensureSpace(90);
+      doc.setFontSize(11);
+      doc.setFont(undefined, 'bold');
+      doc.text(`${s.name} — ${s.view}`, margin, y);
+      doc.setFont(undefined, 'normal');
+      y += 14;
+      const legsStr = s.legs.map((l) => `${l.action} ${l.type} $${l.strike} (${l.expiry})`).join('; ');
+      writeParagraph(legsStr, 9);
+      writeParagraph(`${s.pricing.credit_or_debit} $${s.pricing.amount_per_contract_usd}/ct, max loss $${s.pricing.max_loss_per_contract_usd}, max profit ${s.pricing.max_profit_per_contract_usd ?? 'uncapped'} (${s.pricing.pricing_source})`, 9);
+      writeParagraph(`Sizing: ${s.sizing.contracts} contracts, total max loss $${s.sizing.total_max_loss_usd}`, 9);
+      writeParagraph(`Profit target 50%: $${s.profit_target_50pct.trigger_price_usd} | Stop-loss: ${s.stop_loss.price_trigger_usd != null ? '$' + s.stop_loss.price_trigger_usd : 'monitor manually'} (${s.stop_loss.structural_trigger})`, 9);
+      writeParagraph(`POP: ${s.pop_pct ?? 'n/a'}% | Entry: ${s.entry_trigger} | Liquidity: ${s.liquidity_check.status}`, 9);
+      y += 8;
+    });
+
+    writeHeading('POP Ranking');
+    o.pop_ranking.forEach((p) => writeParagraph(`${p.rank}. ${p.strategy_name} — ${p.pop_pct}% (${p.why})`, 9));
+
+    doc.setFontSize(8);
+    doc.setTextColor(150);
+    ensureSpace(20);
+    doc.text('All figures illustrative unless pricing_source is "live_chain". Not financial advice.', margin, pageHeight - 24);
+
+    doc.save(`${currentData.ticker}_Coffee_and_Tea_${currentCtInput.session_date}.pdf`);
+  } finally {
+    ctPdfBtn.disabled = false;
+  }
+}
+
+ctRunBtn.addEventListener('click', runCoffeeAndTea);
+ctPdfBtn.addEventListener('click', downloadCoffeeAndTeaPdf);
 
 renderHistory();
 renderFlowHistory();

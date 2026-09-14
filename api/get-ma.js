@@ -57,8 +57,27 @@ export default async function handler(req, res) {
       return +(slice.reduce((sum, v) => sum + v, 0) / period).toFixed(2);
     };
 
+    // Annualized realized volatility from daily log returns - standard
+    // close-to-close historical vol calculation. Used by Protocol Coffee
+    // and Tea's IV-rich/cheap/fair check.
+    const realizedVol = (arr, period) => {
+      if (arr.length < period + 1) return null;
+      const slice = arr.slice(-(period + 1));
+      const logReturns = [];
+      for (let i = 1; i < slice.length; i++) {
+        logReturns.push(Math.log(slice[i] / slice[i - 1]));
+      }
+      const mean = logReturns.reduce((s, v) => s + v, 0) / logReturns.length;
+      const variance = logReturns.reduce((s, v) => s + (v - mean) ** 2, 0) / (logReturns.length - 1);
+      const dailyStdDev = Math.sqrt(variance);
+      const annualized = dailyStdDev * Math.sqrt(252) * 100; // as a percentage
+      return +annualized.toFixed(2);
+    };
+
     const ma30 = sma(validCloses, 30);
     const ma200 = sma(validCloses, 200);
+    const realizedVol10d = realizedVol(validCloses, 10);
+    const realizedVol20d = realizedVol(validCloses, 20);
     const lastPrice = +validCloses[validCloses.length - 1].toFixed(2);
 
     return res.status(200).json({
@@ -67,6 +86,8 @@ export default async function handler(req, res) {
       ma30,
       ma200,
       ma200_available: validCloses.length >= 200,
+      realized_vol_10d_pct: realizedVol10d,
+      realized_vol_20d_pct: realizedVol20d,
     });
   } catch (err) {
     return res.status(500).json({ error: 'Server error', detail: String(err) });
