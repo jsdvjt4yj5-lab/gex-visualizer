@@ -2099,110 +2099,41 @@ function renderCtOutput(o) {
 }
 
 async function downloadCoffeeAndTeaPdf() {
-  if (!currentCtOutput) return;
+  if (!currentCtOutput || !currentCtInput) return;
   ctPdfBtn.disabled = true;
+  setCtStatus('Rendering styled PDF...');
 
   try {
-    const { jsPDF } = window.jspdf;
-    const doc = new jsPDF({ unit: 'pt', format: 'letter' });
-    const pageWidth = doc.internal.pageSize.getWidth();
-    const pageHeight = doc.internal.pageSize.getHeight();
-    const margin = 48;
-    let y = margin;
-
-    const ensureSpace = (needed) => {
-      if (y + needed > pageHeight - margin) {
-        doc.addPage();
-        y = margin;
-      }
-    };
-
-    const writeParagraph = (text, size = 10) => {
-      doc.setFontSize(size);
-      const lines = doc.splitTextToSize(text, pageWidth - margin * 2);
-      lines.forEach((line) => {
-        ensureSpace(14);
-        doc.text(line, margin, y);
-        y += 14;
-      });
-    };
-
-    const writeHeading = (text) => {
-      ensureSpace(24);
-      doc.setFontSize(13);
-      doc.setFont(undefined, 'bold');
-      doc.setTextColor(20);
-      doc.text(text, margin, y);
-      doc.setFont(undefined, 'normal');
-      y += 18;
-    };
-
-    doc.setFontSize(17);
-    doc.setFont(undefined, 'bold');
-    doc.text(`Protocol Coffee and Tea — ${currentData.ticker}`, margin, y);
-    y += 22;
-
-    doc.setFontSize(10);
-    doc.setFont(undefined, 'normal');
-    doc.setTextColor(100);
-    doc.text(`${currentCtInput.session_date} · exp ${currentCtInput.expiration} · portfolio $${currentCtInput.portfolio_size_usd}`, margin, y);
-    y += 24;
-    doc.setTextColor(0);
-
-    const o = currentCtOutput;
-
-    writeHeading('Market Structure');
-    writeParagraph(o.market_structure.summary);
-    o.market_structure.key_levels.forEach((k) => writeParagraph(`  $${k.strike} (${k.type}, ${k.gex_usd_m ?? '-'}M): ${k.significance}`, 9));
-    y += 6;
-
-    writeHeading('Macro Context');
-    writeParagraph(`${o.macro_context.key_catalyst} — ${o.macro_context.why_it_matters}`);
-    y += 6;
-
-    writeHeading('Volatility Check');
-    writeParagraph(`10d RV ${o.volatility_check.realized_vol_10d_pct}% / 20d RV ${o.volatility_check.realized_vol_20d_pct}% vs IV ${o.volatility_check.iv_used_pct}% — ${o.volatility_check.verdict.toUpperCase()}: ${o.volatility_check.strategy_tilt}`);
-    y += 6;
-
-    if (o.eod_flow_context) {
-      writeHeading('EOD Flow Context');
-      writeParagraph(o.eod_flow_context.session_summary);
-      writeParagraph(o.eod_flow_context.tension_or_alignment_note, 9);
-      y += 6;
-    }
-
-    writeHeading('Trade Thesis');
-    writeParagraph(`Base case: ${o.trade_thesis.base_case}`);
-    writeParagraph(`Upside break: ${o.trade_thesis.upside_break.condition} -> ${o.trade_thesis.upside_break.target_levels.join(', ')}`, 9);
-    writeParagraph(`Downside break: ${o.trade_thesis.downside_break.condition} -> ${o.trade_thesis.downside_break.target_levels.join(', ')}`, 9);
-    y += 6;
-
-    writeHeading('Strategy Comparison');
-    o.strategies.forEach((s) => {
-      ensureSpace(90);
-      doc.setFontSize(11);
-      doc.setFont(undefined, 'bold');
-      doc.text(`${s.name} — ${s.view}`, margin, y);
-      doc.setFont(undefined, 'normal');
-      y += 14;
-      const legsStr = s.legs.map((l) => `${l.action} ${l.type} $${l.strike} (${l.expiry})`).join('; ');
-      writeParagraph(legsStr, 9);
-      writeParagraph(`${s.pricing.credit_or_debit} $${s.pricing.amount_per_contract_usd}/ct, max loss $${s.pricing.max_loss_per_contract_usd}, max profit ${s.pricing.max_profit_per_contract_usd ?? 'uncapped'} (${s.pricing.pricing_source})`, 9);
-      writeParagraph(`Sizing: ${s.sizing.contracts} contracts, total max loss $${s.sizing.total_max_loss_usd}`, 9);
-      writeParagraph(`Profit target 50%: $${s.profit_target_50pct.trigger_price_usd} | Stop-loss: ${s.stop_loss.price_trigger_usd != null ? '$' + s.stop_loss.price_trigger_usd : 'monitor manually'} (${s.stop_loss.structural_trigger})`, 9);
-      writeParagraph(`POP: ${s.pop_pct ?? 'n/a'}% | Entry: ${s.entry_trigger} | Liquidity: ${s.liquidity_check.status}`, 9);
-      y += 8;
+    const res = await fetch('/api/render-coffee-and-tea-pdf', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        output: currentCtOutput,
+        session_date: currentCtInput.session_date,
+        expiration: currentCtInput.expiration,
+        portfolio_size: currentCtInput.portfolio_size_usd,
+        spot: currentCtInput.gex_data.spot,
+      }),
     });
 
-    writeHeading('POP Ranking');
-    o.pop_ranking.forEach((p) => writeParagraph(`${p.rank}. ${p.strategy_name} — ${p.pop_pct}% (${p.why})`, 9));
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: `Request failed (${res.status})` }));
+      throw new Error(err.error || `Request failed (${res.status})`);
+    }
 
-    doc.setFontSize(8);
-    doc.setTextColor(150);
-    ensureSpace(20);
-    doc.text('All figures illustrative unless pricing_source is "live_chain". Not financial advice.', margin, pageHeight - 24);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${currentData.ticker}_Coffee_and_Tea_${currentCtInput.session_date}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
 
-    doc.save(`${currentData.ticker}_Coffee_and_Tea_${currentCtInput.session_date}.pdf`);
+    setCtStatus('PDF downloaded.');
+  } catch (err) {
+    setCtStatus('PDF generation failed: ' + err.message, true);
   } finally {
     ctPdfBtn.disabled = false;
   }
