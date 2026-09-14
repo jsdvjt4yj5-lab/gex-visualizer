@@ -207,16 +207,27 @@ class handler(BaseHTTPRequestHandler):
                 chain = quote_client.get_option_chain(symbol, expiry)
 
                 total_rows = len(chain)
-                skipped_missing = 0   # raw_strike/oi/iv was None
-                skipped_nan = 0       # converted to float but was NaN
-                skipped_bad_value = 0  # couldn't convert to float at all
+                skipped_missing = 0        # raw_strike/oi/iv was None
+                skipped_nan = 0            # converted to float but was NaN
+                skipped_conversion_error = 0  # couldn't convert to float at all
+                skipped_gamma_failed = 0   # converted fine, but bs_gamma rejected the inputs (e.g. iv <= 0)
                 used_rows = 0
+                sample_rows = []  # a few raw (pre-conversion) values, for debugging
 
                 day_had_data = False
                 for _, row in chain.iterrows():
                     raw_strike = row["strike"]
                     oi = row["open_interest"]
                     iv = row["implied_vol"]
+
+                    if len(sample_rows) < 3:
+                        sample_rows.append({
+                            "strike": repr(raw_strike),
+                            "open_interest": repr(oi),
+                            "implied_vol": repr(iv),
+                            "put_call": repr(row.get("put_call")),
+                        })
+
                     if raw_strike is None or oi is None or iv is None:
                         skipped_missing += 1
                         continue
@@ -225,7 +236,7 @@ class handler(BaseHTTPRequestHandler):
                         oi = float(oi)
                         iv = float(iv)
                     except (TypeError, ValueError):
-                        skipped_bad_value += 1
+                        skipped_conversion_error += 1
                         continue
                     # pandas represents missing numeric cells as NaN, not
                     # None - the "is None" check above does NOT catch this,
@@ -241,7 +252,7 @@ class handler(BaseHTTPRequestHandler):
                         by_strike[strike] = 0.0
                     gamma = bs_gamma(spot, strike, t_years, iv, risk_free_rate, dividend_yield)
                     if gamma is None or math.isnan(gamma):
-                        skipped_bad_value += 1
+                        skipped_gamma_failed += 1
                         continue
                     contract_gex = gamma * oi * 100 * (spot ** 2) * 0.01
                     if abs(contract_gex) >= 1:  # ignore dust-level contributions when checking "had data"
@@ -253,11 +264,14 @@ class handler(BaseHTTPRequestHandler):
                         by_strike[strike] -= contract_gex
 
                 diagnostics[expiry] = {
+                    "t_years": t_years,
                     "total_rows": total_rows,
                     "used_rows": used_rows,
                     "skipped_missing": skipped_missing,
                     "skipped_nan": skipped_nan,
-                    "skipped_bad_value": skipped_bad_value,
+                    "skipped_conversion_error": skipped_conversion_error,
+                    "skipped_gamma_failed": skipped_gamma_failed,
+                    "sample_rows": sample_rows,
                 }
 
                 if day_had_data:
