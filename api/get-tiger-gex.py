@@ -200,10 +200,17 @@ class handler(BaseHTTPRequestHandler):
             by_strike = {}
             expiries_with_data = []
             expiries_empty = []
+            diagnostics = {}  # per-expiry row counts, to make future debugging faster
 
             for expiry in expiries_to_fetch:
                 t_years = years_to_expiry(expiry, now_et)
                 chain = quote_client.get_option_chain(symbol, expiry)
+
+                total_rows = len(chain)
+                skipped_missing = 0   # raw_strike/oi/iv was None
+                skipped_nan = 0       # converted to float but was NaN
+                skipped_bad_value = 0  # couldn't convert to float at all
+                used_rows = 0
 
                 day_had_data = False
                 for _, row in chain.iterrows():
@@ -211,25 +218,47 @@ class handler(BaseHTTPRequestHandler):
                     oi = row["open_interest"]
                     iv = row["implied_vol"]
                     if raw_strike is None or oi is None or iv is None:
+                        skipped_missing += 1
                         continue
                     try:
                         strike = float(raw_strike)
                         oi = float(oi)
                         iv = float(iv)
                     except (TypeError, ValueError):
+                        skipped_bad_value += 1
                         continue
+                    # pandas represents missing numeric cells as NaN, not
+                    # None - the "is None" check above does NOT catch this,
+                    # so it needs an explicit isnan check or NaN silently
+                    # poisons the gamma calc (gamma/contract_gex become NaN,
+                    # and "abs(NaN) >= 1" is always False, so the row never
+                    # counts as data without ever raising an error).
+                    if math.isnan(strike) or math.isnan(oi) or math.isnan(iv):
+                        skipped_nan += 1
+                        continue
+
                     if strike not in by_strike:
                         by_strike[strike] = 0.0
                     gamma = bs_gamma(spot, strike, t_years, iv, risk_free_rate, dividend_yield)
-                    if gamma is None:
+                    if gamma is None or math.isnan(gamma):
+                        skipped_bad_value += 1
                         continue
                     contract_gex = gamma * oi * 100 * (spot ** 2) * 0.01
                     if abs(contract_gex) >= 1:  # ignore dust-level contributions when checking "had data"
                         day_had_data = True
+                        used_rows += 1
                     if row["put_call"] == "CALL":
                         by_strike[strike] += contract_gex
                     elif row["put_call"] == "PUT":
                         by_strike[strike] -= contract_gex
+
+                diagnostics[expiry] = {
+                    "total_rows": total_rows,
+                    "used_rows": used_rows,
+                    "skipped_missing": skipped_missing,
+                    "skipped_nan": skipped_nan,
+                    "skipped_bad_value": skipped_bad_value,
+                }
 
                 if day_had_data:
                     expiries_with_data.append(expiry)
@@ -254,6 +283,7 @@ class handler(BaseHTTPRequestHandler):
                     "read_type": read_type,
                     "source": "tiger",
                     "note": f"Checked {len(expiries_to_fetch)} expirations this week ({', '.join(expiries_to_fetch)}), all returned no usable open_interest/implied_vol data.",
+                    "diagnostics": diagnostics,
                 }).encode())
                 return
 
@@ -305,6 +335,7 @@ class handler(BaseHTTPRequestHandler):
                     "risk_free_rate": risk_free_rate,
                     "dividend_yield": dividend_yield,
                 },
+                "diagnostics": diagnostics,
             }
             if expiries_empty:
                 response_body["expirations_skipped_empty"] = expiries_empty
