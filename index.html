@@ -2079,6 +2079,8 @@ async function runCoffeeAndTea() {
   }
 }
 
+let ctChartInstance = null;
+
 function ctSection(title, contentHtml) {
   return `<div style="margin-top:16px;">
     <h3 style="font-size:14px; color:#eda100; margin-bottom:6px;">${title}</h3>
@@ -2086,8 +2088,78 @@ function ctSection(title, contentHtml) {
   </div>`;
 }
 
+// Renders the GEX profile directly in the Coffee and Tea analysis panel,
+// using the fuller +/-8% band (skipClusterTrim) rather than the tighter
+// cluster view used on the main dashboard chart - this is the session's
+// own reference chart, so it favors showing more context over compactness.
+function renderCtGammaChart(data) {
+  if (!data) return;
+  const canvas = document.getElementById('ctGammaChart');
+  if (!canvas) return;
+
+  const spot = data.spot_price;
+  const band = 0.08;
+  let plotLevels = data.levels.filter(
+    (l) => l.strike >= spot * (1 - band) && l.strike <= spot * (1 + band)
+  );
+  if (plotLevels.length === 0) plotLevels = data.levels;
+
+  const labels = plotLevels.map((l) => '$' + l.strike);
+  const toDisplayScale = (v) => Math.sign(v) * Math.sqrt(Math.abs(v));
+  const fromDisplayScale = (v) => Math.sign(v) * v * v;
+  const values = plotLevels.map((l) => toDisplayScale(l.net_gex_millions));
+  const colors = plotLevels.map((l) =>
+    l.is_flip_zone ? '#eda100' : l.net_gex_millions >= 0 ? '#199e70' : '#e66767'
+  );
+
+  canvas.parentElement.style.height = Math.max(300, plotLevels.length * 22 + 60) + 'px';
+
+  if (ctChartInstance) ctChartInstance.destroy();
+
+  ctChartInstance = new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{ data: values, backgroundColor: colors, borderRadius: 4, barThickness: 14 }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const v = plotLevels[ctx.dataIndex].net_gex_millions;
+              return (v < 0 ? '-' : '+') + '$' + Math.abs(v).toFixed(2) + 'M';
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          grid: { color: 'rgba(150,150,150,0.15)' },
+          ticks: {
+            color: '#999',
+            callback: (v) => {
+              const actual = fromDisplayScale(v);
+              return (actual < 0 ? '-' : '+') + '$' + Math.abs(actual).toFixed(0) + 'M';
+            },
+          },
+        },
+        y: { grid: { display: false }, ticks: { color: '#999', font: { size: 10 } } },
+      },
+    },
+  });
+}
+
 function renderCtOutput(o) {
   let html = '';
+
+  html += ctSection('GEX Profile', `
+    <div style="position:relative; width:100%;"><canvas id="ctGammaChart"></canvas></div>
+  `);
 
   html += ctSection('Market Structure', `
     <p>${o.market_structure.summary}</p>
@@ -2165,28 +2237,13 @@ function renderCtOutput(o) {
   html += `<p style="margin-top:16px; font-size:11px; color:#666;">All figures illustrative unless pricing_source is "live_chain". Not financial advice. GEX walls are dealer-hedging mechanics, not guarantees.</p>`;
 
   ctOutput.innerHTML = html;
+  renderCtGammaChart(currentData);
 }
 
 async function downloadCoffeeAndTeaPdf() {
   if (!currentCtOutput || !currentCtInput) return;
   ctPdfBtn.disabled = true;
   setCtStatus('Rendering styled PDF...');
-
-  // Capture a fuller GEX profile specifically for the PDF - the on-screen
-  // chart is intentionally trimmed to the tight meaningful cluster for
-  // readability, but the PDF has room to show the wider +/-8% picture.
-  // Re-render onto the same canvas with the trim skipped, grab the image,
-  // then restore the normal compact on-screen view right after.
-  let gexChartImageB64 = null;
-  if (currentData) {
-    try {
-      renderChart(currentData, { skipClusterTrim: true });
-      const canvas = document.getElementById('gexChart');
-      gexChartImageB64 = canvas.toDataURL('image/png', 1.0).split(',')[1];
-    } finally {
-      renderChart(currentData);
-    }
-  }
 
   try {
     const res = await fetch('/api/render-coffee-and-tea-pdf', {
@@ -2198,7 +2255,6 @@ async function downloadCoffeeAndTeaPdf() {
         expiration: currentCtInput.expiration,
         portfolio_size: currentCtInput.portfolio_size_usd,
         spot: currentCtInput.gex_data.spot,
-        gex_chart_image: gexChartImageB64,
       }),
     });
 

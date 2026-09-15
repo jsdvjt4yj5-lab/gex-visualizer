@@ -550,8 +550,7 @@ def build_footer(S):
 # ---------- entry point ----------
 
 def generate_pdf(output: ReasoningOutput, session_date: str, expiration: str,
-                  portfolio_size: float, spot: float, out_path: str,
-                  gex_chart_image: str = None):
+                  portfolio_size: float, spot: float, out_path: str):
     doc = SimpleDocTemplate(
         out_path, pagesize=letter,
         leftMargin=0.9*inch, rightMargin=0.9*inch,
@@ -559,7 +558,6 @@ def generate_pdf(output: ReasoningOutput, session_date: str, expiration: str,
     )
     S = []
     build_header(S, session_date, expiration, portfolio_size, spot)
-    build_gamma_chart(S, gex_chart_image)
     build_market_structure(S, output.market_structure)
     build_macro_context(S, output.macro_context)
     build_vol_check(S, output.volatility_check)
@@ -634,7 +632,6 @@ class handler(BaseHTTPRequestHandler):
             expiration = body.get('expiration')
             portfolio_size = body.get('portfolio_size')
             spot = body.get('spot')
-            gex_chart_image = body.get('gex_chart_image')  # optional - PDF renders without a chart if absent
 
             if not all([output_data, session_date, expiration, portfolio_size, spot]):
                 self._send_json_error(400, 'Missing one of: output, session_date, expiration, portfolio_size, spot')
@@ -656,7 +653,6 @@ class handler(BaseHTTPRequestHandler):
                 portfolio_size=float(portfolio_size),
                 spot=float(spot),
                 out_path=out_path,
-                gex_chart_image=gex_chart_image,
             )
 
             with open(out_path, 'rb') as f:
