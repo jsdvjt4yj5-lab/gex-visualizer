@@ -152,12 +152,35 @@ def save_snapshot_to_d1(session_date, gex_data_json):
     import urllib.request
     import urllib.error
 
-    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
-    database_id = os.environ.get("CLOUDFLARE_D1_DATABASE_ID")
-    api_token = os.environ.get("CLOUDFLARE_API_TOKEN")
+    account_id = (os.environ.get("CLOUDFLARE_ACCOUNT_ID") or "").strip()
+    database_id = (os.environ.get("CLOUDFLARE_D1_DATABASE_ID") or "").strip()
+    api_token = (os.environ.get("CLOUDFLARE_API_TOKEN") or "").strip()
 
     if not all([account_id, database_id, api_token]):
         return {"stored": False, "reason": "missing_cloudflare_env_vars"}
+
+    # The account_id/database_id get built directly into the request URL,
+    # which Python's http.client encodes as pure ASCII - a stray non-ASCII
+    # character (a smart/curly hyphen instead of a regular one, a
+    # non-breaking space, etc. - easy to pick up via copy-paste) throws a
+    # cryptic position-based UnicodeEncodeError deep inside urlopen().
+    # Check each value explicitly up front so a bad one is named clearly
+    # instead of surfacing as an opaque "ordinal not in range(128)" error.
+    for var_name, value in [
+        ("CLOUDFLARE_ACCOUNT_ID", account_id),
+        ("CLOUDFLARE_D1_DATABASE_ID", database_id),
+        ("CLOUDFLARE_API_TOKEN", api_token),
+    ]:
+        try:
+            value.encode("ascii")
+        except UnicodeEncodeError:
+            return {
+                "stored": False,
+                "reason": "non_ascii_env_var",
+                "detail": f"{var_name} contains a non-ASCII character (often a smart/curly "
+                          f"dash or invisible character from copy-paste) - re-copy it from the "
+                          f"source and re-paste into Vercel, avoiding rich-text sources.",
+            }
 
     url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/d1/database/{database_id}/query"
     payload = json.dumps({
