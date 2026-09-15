@@ -200,7 +200,13 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
+        // max_tokens must exceed thinking.budget_tokens - budget covers the
+        // reasoning (Black-Scholes across 3 strategies, POP calcs, etc.)
+        // and the remainder covers the actual JSON response on top; the
+        // original max_tokens (32000) covered everything as visible text,
+        // so this keeps that same total headroom rather than shrinking it.
         max_tokens: 32000,
+        thinking: { type: 'enabled', budget_tokens: 12000 },
         system: systemPrompt,
         messages: [
           { role: 'user', content: JSON.stringify(input, null, 2) },
@@ -214,6 +220,14 @@ export default async function handler(req, res) {
     }
 
     const result = await anthropicRes.json();
+    // With extended thinking on, result.content holds a "thinking" block
+    // (the model's scratch work - Black-Scholes math, draft JSON, review)
+    // followed by a "text" block. Only the text block is meant to be the
+    // final answer, so this still correctly isolates it from the
+    // reasoning - the thinking block no longer leaks into what gets
+    // JSON-parsed below, which is what was silently breaking the naive
+    // firstBrace/lastBrace extraction whenever the model drafted the
+    // JSON more than once before finalizing it.
     const textBlock = result.content.find((b) => b.type === 'text');
     if (!textBlock) {
       return res.status(502).json({ error: 'No text content in model response' });
