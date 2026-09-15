@@ -692,7 +692,8 @@ async function downloadPdf() {
   }
 }
 
-function renderChart(data) {
+function renderChart(data, opts) {
+  const skipClusterTrim = opts && opts.skipClusterTrim;
   // Only show strikes within +/-8% of spot - the full aggregated chain
   // spans a much wider range (e.g. $300-$825 for SPY), and strikes that
   // far OTM have near-zero GEX, so plotting all of them just buries the
@@ -713,8 +714,10 @@ function renderChart(data) {
   // reader scroll past dozens of flat bars to find it. Uses the same
   // "value area around the dominant cluster" idea as the volume
   // profile's POC/value-area calc, applied to |GEX| instead of volume.
+  // Skippable via opts.skipClusterTrim - the PDF export wants the fuller
+  // +/-8% picture even though the on-screen view stays compact.
   const maxAbs = Math.max(...plotLevels.map((l) => Math.abs(l.net_gex_millions)), 0);
-  if (maxAbs > 0) {
+  if (!skipClusterTrim && maxAbs > 0) {
     // A strike counts as "meaningful" once it clears 3% of the band's
     // largest wall - small enough to keep genuine secondary walls,
     // large enough to drop the long tail of effectively-empty strikes.
@@ -2169,6 +2172,22 @@ async function downloadCoffeeAndTeaPdf() {
   ctPdfBtn.disabled = true;
   setCtStatus('Rendering styled PDF...');
 
+  // Capture a fuller GEX profile specifically for the PDF - the on-screen
+  // chart is intentionally trimmed to the tight meaningful cluster for
+  // readability, but the PDF has room to show the wider +/-8% picture.
+  // Re-render onto the same canvas with the trim skipped, grab the image,
+  // then restore the normal compact on-screen view right after.
+  let gexChartImageB64 = null;
+  if (currentData) {
+    try {
+      renderChart(currentData, { skipClusterTrim: true });
+      const canvas = document.getElementById('gexChart');
+      gexChartImageB64 = canvas.toDataURL('image/png', 1.0).split(',')[1];
+    } finally {
+      renderChart(currentData);
+    }
+  }
+
   try {
     const res = await fetch('/api/render-coffee-and-tea-pdf', {
       method: 'POST',
@@ -2179,6 +2198,7 @@ async function downloadCoffeeAndTeaPdf() {
         expiration: currentCtInput.expiration,
         portfolio_size: currentCtInput.portfolio_size_usd,
         spot: currentCtInput.gex_data.spot,
+        gex_chart_image: gexChartImageB64,
       }),
     });
 
