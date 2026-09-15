@@ -77,6 +77,7 @@ import tempfile
 from datetime import date, datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 from tigeropen.tiger_open_config import TigerOpenClientConfig
 from tigeropen.quote.quote_client import QuoteClient
 from tigeropen.common.consts import Market
@@ -85,6 +86,13 @@ EASTERN = ZoneInfo("America/New_York")
 
 DEFAULT_RISK_FREE_RATE = 0.043
 DEFAULT_DIVIDEND_YIELD = 0.012
+
+# Only fetch/process strikes within this % of spot in either direction -
+# cuts payload size and parse time substantially, since the far-OTM tails
+# of a full SPY chain carry negligible GEX contribution anyway. Override
+# via TIGER_STRIKE_BAND_PCT (e.g. "0.10" for +-10%) if a wider or
+# narrower window is ever needed.
+DEFAULT_STRIKE_BAND_PCT = 0.08
 
 # Last-resort fallback if even get_option_analysis fails (e.g. rate limit,
 # transient error) - a rough, deliberately unremarkable SPY-ish vol level
@@ -193,8 +201,11 @@ class handler(BaseHTTPRequestHandler):
 
             risk_free_rate = get_config_float("TIGER_RISK_FREE_RATE", DEFAULT_RISK_FREE_RATE)
             dividend_yield = get_config_float("TIGER_DIVIDEND_YIELD", DEFAULT_DIVIDEND_YIELD)
+            strike_band_pct = get_config_float("TIGER_STRIKE_BAND_PCT", DEFAULT_STRIKE_BAND_PCT)
 
             spot = get_spot_price(symbol)
+            strike_low = spot * (1 - strike_band_pct)
+            strike_high = spot * (1 + strike_band_pct)
             quote_client = get_quote_client()
             underlying_iv, underlying_iv_source = get_underlying_iv(quote_client, symbol)
 
@@ -236,6 +247,20 @@ class handler(BaseHTTPRequestHandler):
             for expiry in expiries_to_fetch:
                 t_years = years_to_expiry(expiry, now_et)
                 chain = quote_client.get_option_chain(symbol, expiry)
+
+                # Narrow to strikes within the configured band around spot
+                # before doing anything else with this chain - the far
+                # tails add parse/gamma-calc time and payload size for
+                # negligible GEX contribution. Non-numeric/missing strikes
+                # are left in the "keep" set here; they still hit the
+                # existing per-row missing/conversion-error handling below
+                # rather than being silently dropped by the filter itself.
+                if not chain.empty:
+                    strike_numeric = pd.to_numeric(chain["strike"], errors="coerce")
+                    in_band = strike_numeric.isna() | (
+                        (strike_numeric >= strike_low) & (strike_numeric <= strike_high)
+                    )
+                    chain = chain[in_band]
 
                 total_rows = len(chain)
                 skipped_missing = 0        # raw_strike/oi was None (iv is no longer a skip reason - see fallback below)
@@ -391,6 +416,8 @@ class handler(BaseHTTPRequestHandler):
                 "read_type": read_type,
                 "source": "tiger",  # distinguishes this from screenshot-sourced data
                 "gamma_method": "black_scholes_local",  # gamma is computed locally, not read from Tiger (see header comment)
+                "strike_band_pct": strike_band_pct,
+                "strike_range_fetched": [round(strike_low, 2), round(strike_high, 2)],
                 "gamma_inputs": {
                     "risk_free_rate": risk_free_rate,
                     "dividend_yield": dividend_yield,
