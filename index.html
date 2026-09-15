@@ -234,8 +234,8 @@
 const PARSE_ENDPOINT = '/api/parse-gex'; // adjust if hosted elsewhere
 const ANALYZE_ENDPOINT = '/api/analyze-gex';
 const WEEKLY_ENDPOINT = '/api/analyze-gex-period';
-const MA_ENDPOINT = '/api/get-ma';
-const VOLUME_PROFILE_ENDPOINT = '/api/get-volume-profile';
+const MA_ENDPOINT = '/api/get-price-data?type=ma';
+const VOLUME_PROFILE_ENDPOINT = '/api/get-price-data?type=volume-profile';
 const fileInput = document.getElementById('fileInput');
 const dropZone = document.getElementById('dropZone');
 const dropZoneLabel = document.getElementById('dropZoneLabel');
@@ -578,7 +578,7 @@ async function processGexData(data) {
 
   let movingAverages = null;
   try {
-    const maRes = await fetch(`${MA_ENDPOINT}?symbol=${encodeURIComponent(data.ticker)}`);
+    const maRes = await fetch(`${MA_ENDPOINT}&symbol=${encodeURIComponent(data.ticker)}`);
     if (maRes.ok) {
       movingAverages = await maRes.json();
       data.movingAverages = movingAverages;
@@ -592,7 +592,7 @@ async function processGexData(data) {
 
   let volumeProfileSummary = null;
   try {
-    const vpRes = await fetch(`${VOLUME_PROFILE_ENDPOINT}?symbol=${encodeURIComponent(data.ticker)}`);
+    const vpRes = await fetch(`${VOLUME_PROFILE_ENDPOINT}&symbol=${encodeURIComponent(data.ticker)}`);
     if (vpRes.ok) {
       const vp = await vpRes.json();
       volumeProfileSummary = {
