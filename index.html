@@ -188,16 +188,10 @@
   </label>
 </div>
 
-<div style="margin-top:8px;">
-  <label style="font-size:13px; color:#999; display:block; margin-bottom:4px;">
-    Macro events this window (one per line: Event Name | YYYY-MM-DD | HH:MM ET | detail)
-  </label>
-  <textarea id="ctMacroEvents" rows="3" style="width:100%; max-width:600px; background:#1a1a1a; color:#eee; border:1px solid #333; border-radius:6px; padding:8px 12px; font-family:inherit; font-size:13px;" placeholder="FOMC decision | 2026-09-16 | 14:00 | Rate decision + press conference 14:30 ET"></textarea>
-</div>
-
 <div class="controls" style="margin-top:12px;">
   <button id="ctRunBtn" disabled>Run Protocol Coffee and Tea</button>
   <button id="ctPdfBtn" disabled>Download session PDF</button>
+  <button id="ctRefreshMacroBtn" type="button" title="Force a fresh macro calendar search for this month, bypassing the cache">Refresh macro calendar</button>
 </div>
 
 <div class="status" id="ctStatus"></div>
@@ -2004,8 +1998,8 @@ flowMonthlyPdfBtn.addEventListener('click', downloadMonthlyFlowPdf);
 
 const ctPortfolioSize = document.getElementById('ctPortfolioSize');
 const ctAssumedIv = document.getElementById('ctAssumedIv');
-const ctMacroEvents = document.getElementById('ctMacroEvents');
 const ctRunBtn = document.getElementById('ctRunBtn');
+const ctRefreshMacroBtn = document.getElementById('ctRefreshMacroBtn');
 const ctPdfBtn = document.getElementById('ctPdfBtn');
 const ctStatusEl = document.getElementById('ctStatus');
 const ctOutput = document.getElementById('ctOutput');
@@ -2080,24 +2074,93 @@ function buildFlowDataFromCurrent(stats) {
   };
 }
 
-function parseMacroEvents(text) {
-  return text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .map((line) => {
-      const parts = line.split('|').map((p) => p.trim());
-      return {
-        event: parts[0] || 'Unnamed event',
-        date: parts[1] || '',
-        time_et: parts[2] || null,
-        detail: parts[3] || null,
-      };
-    });
-}
-
 function updateCtButtonState() {
   ctRunBtn.disabled = !currentData;
+}
+
+// Raw call to the web search-backed endpoint - not called directly per
+// session anymore, see getMacroEventsForSession() below. Kept as its own
+// function since the caching wrapper needs a plain fetch to build on.
+async function fetchMacroEvents(sessionDate, expiration) {
+  try {
+    const res = await fetch('/api/get-macro-events', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_date: sessionDate, expiration }),
+    });
+    if (!res.ok) {
+      console.warn('Macro events fetch failed:', res.status);
+      return [];
+    }
+    const { macro_events } = await res.json();
+    return Array.isArray(macro_events) ? macro_events : [];
+  } catch (err) {
+    console.warn('Macro events fetch error:', err);
+    return [];
+  }
+}
+
+const MACRO_CACHE_PREFIX = 'macroEventsCache_'; // + "YYYY-MM"
+
+// Fetches the full month's macro calendar (plus a ~10-day buffer into the
+// next month, since a session's expiration can land just past month-end)
+// and overwrites the cache for that month - used both on a cache miss and
+// by the manual "Refresh macro calendar" button.
+async function fetchAndCacheMonth(monthKey) {
+  const [y, m] = monthKey.split('-').map(Number);
+  const monthStart = `${monthKey}-01`;
+  const monthEndDate = new Date(Date.UTC(y, m, 10));
+  const monthEnd = monthEndDate.toISOString().slice(0, 10);
+
+  const events = await fetchMacroEvents(monthStart, monthEnd);
+  try {
+    localStorage.setItem(MACRO_CACHE_PREFIX + monthKey, JSON.stringify({ fetched_at: new Date().toISOString(), events }));
+  } catch (e) {
+    // localStorage full/unavailable - fine, just won't cache this run
+  }
+  return events;
+}
+
+// Runs the macro event search at most once per calendar month - on a
+// cache miss, fetches the whole month via fetchAndCacheMonth() above.
+// Every session that month then just filters the cached list down to its
+// own [session_date, expiration] window locally - no API call, no search
+// cost. Use the "Refresh macro calendar" button (refreshMacroCalendar())
+// if a new event gets announced mid-month and the cache needs updating
+// before the month rolls over.
+async function getMacroEventsForSession(sessionDate, expiration) {
+  const monthKey = sessionDate.slice(0, 7); // "YYYY-MM"
+  const cacheKey = MACRO_CACHE_PREFIX + monthKey;
+
+  let monthEvents;
+  const cached = localStorage.getItem(cacheKey);
+  if (cached) {
+    try {
+      monthEvents = JSON.parse(cached).events || [];
+    } catch (e) {
+      monthEvents = null;
+    }
+  }
+
+  if (!monthEvents) {
+    monthEvents = await fetchAndCacheMonth(monthKey);
+  }
+
+  return monthEvents.filter((ev) => ev.date >= sessionDate && ev.date <= expiration);
+}
+
+async function refreshMacroCalendar() {
+  const monthKey = new Date().toISOString().slice(0, 7);
+  ctRefreshMacroBtn.disabled = true;
+  setCtStatus('Refreshing macro calendar for ' + monthKey + '...');
+  try {
+    const events = await fetchAndCacheMonth(monthKey);
+    setCtStatus(`Macro calendar refreshed — ${events.length} event(s) found for ${monthKey}.`);
+  } catch (err) {
+    setCtStatus('Macro calendar refresh failed: ' + err.message, true);
+  } finally {
+    ctRefreshMacroBtn.disabled = false;
+  }
 }
 
 async function runCoffeeAndTea() {
@@ -2111,13 +2174,16 @@ async function runCoffeeAndTea() {
     const gexData = buildGexDataFromCurrent(currentData);
     const priorSnapshot = buildPriorSnapshot(currentData.ticker);
     const flowData = buildFlowDataFromCurrent(currentFlowStats);
-    const macroEvents = parseMacroEvents(ctMacroEvents.value);
+    const sessionDate = new Date().toISOString().slice(0, 10);
+
+    setCtStatus('Getting macro calendar for this window...');
+    const macroEvents = await getMacroEventsForSession(sessionDate, currentData.expiration);
 
     // Fold the assumed IV and MA-derived realized vol into gex_data's
     // companion fields the reasoning layer needs - passed as a sibling
     // field rather than cramming into gex_data itself.
     const input = {
-      session_date: new Date().toISOString().slice(0, 10),
+      session_date: sessionDate,
       expiration: currentData.expiration,
       gex_data: gexData,
       flow_data: flowData,
@@ -2310,6 +2376,7 @@ async function downloadCoffeeAndTeaPdf() {
 
 ctRunBtn.addEventListener('click', runCoffeeAndTea);
 ctPdfBtn.addEventListener('click', downloadCoffeeAndTeaPdf);
+ctRefreshMacroBtn.addEventListener('click', refreshMacroCalendar);
 
 renderHistory();
 renderFlowHistory();
