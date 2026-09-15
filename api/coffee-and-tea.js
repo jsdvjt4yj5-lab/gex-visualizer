@@ -178,6 +178,47 @@ function validateOutput(output) {
   return true;
 }
 
+// Best-effort write of the full session output to Cloudflare D1 (ct_sessions
+// table) - this is the storage layer strategy-level backtesting reads
+// from later. Never blocks or fails the actual response; a storage
+// failure just means this session won't be gradeable, not that the
+// session itself failed.
+async function saveSessionToD1(ticker, sessionDate, expiration, outputJson) {
+  const accountId = (process.env.CLOUDFLARE_ACCOUNT_ID || '').trim();
+  const databaseId = (process.env.CLOUDFLARE_D1_DATABASE_ID || '').trim();
+  const apiToken = (process.env.CLOUDFLARE_API_TOKEN || '').trim();
+
+  if (!accountId || !databaseId || !apiToken) {
+    return { stored: false, reason: 'missing_cloudflare_env_vars' };
+  }
+
+  try {
+    const d1Res = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${databaseId}/query`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          sql: 'INSERT OR REPLACE INTO ct_sessions (ticker, session_date, expiration, output_json) VALUES (?, ?, ?, ?)',
+          params: [ticker, sessionDate, expiration, outputJson],
+        }),
+      }
+    );
+    if (!d1Res.ok) {
+      const detail = await d1Res.text();
+      return { stored: false, reason: 'http_error', detail };
+    }
+    const result = await d1Res.json();
+    if (result.success) return { stored: true };
+    return { stored: false, reason: 'd1_query_failed', detail: result.errors };
+  } catch (err) {
+    return { stored: false, reason: 'request_error', detail: String(err) };
+  }
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Use POST' });
@@ -200,13 +241,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        // max_tokens must exceed thinking.budget_tokens - budget covers the
-        // reasoning (Black-Scholes across 3 strategies, POP calcs, etc.)
-        // and the remainder covers the actual JSON response on top; the
-        // original max_tokens (32000) covered everything as visible text,
-        // so this keeps that same total headroom rather than shrinking it.
         max_tokens: 32000,
-        thinking: { type: 'enabled', budget_tokens: 12000 },
         system: systemPrompt,
         messages: [
           { role: 'user', content: JSON.stringify(input, null, 2) },
@@ -220,14 +255,6 @@ export default async function handler(req, res) {
     }
 
     const result = await anthropicRes.json();
-    // With extended thinking on, result.content holds a "thinking" block
-    // (the model's scratch work - Black-Scholes math, draft JSON, review)
-    // followed by a "text" block. Only the text block is meant to be the
-    // final answer, so this still correctly isolates it from the
-    // reasoning - the thinking block no longer leaks into what gets
-    // JSON-parsed below, which is what was silently breaking the naive
-    // firstBrace/lastBrace extraction whenever the model drafted the
-    // JSON more than once before finalizing it.
     const textBlock = result.content.find((b) => b.type === 'text');
     if (!textBlock) {
       return res.status(502).json({ error: 'No text content in model response' });
@@ -267,6 +294,16 @@ export default async function handler(req, res) {
       validateOutput(parsed);
     } catch (validationErr) {
       return res.status(502).json({ error: `Response failed validation: ${validationErr.message}`, raw: parsed });
+    }
+
+    // Persist for later backtesting/grading - never blocks the response.
+    const ticker = input.ticker || 'SPY';
+    if (input.session_date && input.expiration) {
+      const storageResult = await saveSessionToD1(ticker, input.session_date, input.expiration, JSON.stringify(parsed));
+      parsed._session_stored = storageResult.stored;
+      if (!storageResult.stored) {
+        parsed._session_storage_detail = storageResult;
+      }
     }
 
     return res.status(200).json(parsed);

@@ -200,6 +200,18 @@
 
 <hr style="border:none; border-top:1px solid #222; margin:32px 0 20px;" />
 
+<div class="backtest">
+  <h2>Strategy Backtest</h2>
+  <div class="controls" style="margin-top:0;">
+    <button id="gradeBtn" type="button">Grade resolved sessions</button>
+    <button id="summaryBtn" type="button">Show weekly summary</button>
+  </div>
+  <div class="status" id="backtestStatus"></div>
+  <div id="backtestOutput" style="margin-top:12px;"></div>
+</div>
+
+<hr style="border:none; border-top:1px solid #222; margin:32px 0 20px;" />
+
 <div class="history">
   <h2>History</h2>
   <div class="controls" style="margin-top:0;">
@@ -2224,6 +2236,7 @@ async function runCoffeeAndTea() {
     // companion fields the reasoning layer needs - passed as a sibling
     // field rather than cramming into gex_data itself.
     const input = {
+      ticker: currentData.ticker,
       session_date: sessionDate,
       expiration: currentData.expiration,
       gex_data: gexData,
@@ -2418,6 +2431,93 @@ async function downloadCoffeeAndTeaPdf() {
 ctRunBtn.addEventListener('click', runCoffeeAndTea);
 ctPdfBtn.addEventListener('click', downloadCoffeeAndTeaPdf);
 ctRefreshMacroBtn.addEventListener('click', refreshMacroCalendar);
+
+// ---- Strategy backtest (grading + weekly summary) ----
+// Both actions live inside get-snapshot-history.js (action=grade /
+// action=weekly-summary) rather than a new endpoint file, to stay under
+// Vercel's 12-function Hobby-plan cap.
+const gradeBtn = document.getElementById('gradeBtn');
+const summaryBtn = document.getElementById('summaryBtn');
+const backtestStatus = document.getElementById('backtestStatus');
+const backtestOutput = document.getElementById('backtestOutput');
+
+function setBacktestStatus(msg, isError = false) {
+  backtestStatus.textContent = msg;
+  backtestStatus.className = 'status' + (isError ? ' error' : '');
+}
+
+async function runGrading() {
+  const ticker = tickerFilter.value || currentData?.ticker;
+  if (!ticker) {
+    setBacktestStatus('Select a ticker first (use the filter dropdown below, or load a snapshot).', true);
+    return;
+  }
+  gradeBtn.disabled = true;
+  setBacktestStatus(`Grading resolved sessions for ${ticker}...`);
+  try {
+    const res = await fetch(`/api/get-snapshot-history?action=grade&ticker=${encodeURIComponent(ticker)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+    setBacktestStatus(
+      `Checked ${data.sessions_checked} session(s), graded ${data.strategies_graded} strategy result(s) across ${data.sessions_graded} session(s).`
+    );
+    if (data.errors && data.errors.length > 0) {
+      backtestOutput.innerHTML = `<div style="color:#999; font-size:12.5px;">${data.errors.length} item(s) skipped (no price data or already graded) - not necessarily a problem.</div>`;
+    }
+  } catch (err) {
+    setBacktestStatus('Grading failed: ' + err.message, true);
+  } finally {
+    gradeBtn.disabled = false;
+  }
+}
+
+async function showWeeklySummary() {
+  const ticker = tickerFilter.value || currentData?.ticker;
+  if (!ticker) {
+    setBacktestStatus('Select a ticker first (use the filter dropdown below, or load a snapshot).', true);
+    return;
+  }
+  summaryBtn.disabled = true;
+  setBacktestStatus(`Loading weekly summary for ${ticker}...`);
+  try {
+    const res = await fetch(`/api/get-snapshot-history?action=weekly-summary&ticker=${encodeURIComponent(ticker)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+
+    if (data.graded_count === 0) {
+      backtestOutput.innerHTML = `<p style="color:#999;">${data.message}</p>`;
+      setBacktestStatus('');
+      return;
+    }
+
+    const byStrategyRows = data.win_rate_by_strategy
+      .map((s) => `<tr><td style="padding:3px 8px;">${s.strategy_name}</td><td style="padding:3px 8px; text-align:right;">${s.total}</td><td style="padding:3px 8px; text-align:right;">${s.win_rate_pct}%</td></tr>`)
+      .join('');
+
+    backtestOutput.innerHTML = `
+      <div style="font-size:14px; line-height:1.6;">
+        <p><b>${data.win_rate_pct}%</b> win rate over the last 7 days (${data.wins} win${data.wins === 1 ? '' : 's'} / ${data.losses} loss${data.losses === 1 ? '' : 'es'}, ${data.graded_count} graded).</p>
+        <table style="border-collapse:collapse; font-size:12.5px; margin-top:6px;">
+          <tr><th style="padding:3px 8px; color:#999; text-align:left;">Strategy</th><th style="padding:3px 8px; color:#999; text-align:right;">Count</th><th style="padding:3px 8px; color:#999; text-align:right;">Win rate</th></tr>
+          ${byStrategyRows}
+        </table>
+        <p style="margin-top:10px; font-size:12.5px; color:#999;">
+          Predicted POP — wins: ${data.pop_calibration.avg_predicted_pop_for_wins ?? '—'}%,
+          losses: ${data.pop_calibration.avg_predicted_pop_for_losses ?? '—'}%.
+          ${data.pop_calibration.note}
+        </p>
+      </div>
+    `;
+    setBacktestStatus('');
+  } catch (err) {
+    setBacktestStatus('Failed to load summary: ' + err.message, true);
+  } finally {
+    summaryBtn.disabled = false;
+  }
+}
+
+gradeBtn.addEventListener('click', runGrading);
+summaryBtn.addEventListener('click', showWeeklySummary);
 
 renderHistory();
 renderFlowHistory();
