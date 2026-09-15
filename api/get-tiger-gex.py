@@ -140,6 +140,52 @@ def get_config_float(env_name, default):
         return default
 
 
+def save_snapshot_to_d1(session_date, gex_data_json):
+    """Best-effort write of the full daily GEX snapshot to Cloudflare D1,
+    via D1's HTTP query API (no extra dependency - reuses urllib like
+    get_spot_price() above). Storage is a nice-to-have persistence layer
+    on top of the live read, not something the read itself depends on, so
+    any failure here - missing env vars, a network error, a bad response -
+    is swallowed and reported back as {"stored": False, ...} rather than
+    raising, and never blocks or alters the actual GEX response.
+    """
+    import urllib.request
+    import urllib.error
+
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+    database_id = os.environ.get("CLOUDFLARE_D1_DATABASE_ID")
+    api_token = os.environ.get("CLOUDFLARE_API_TOKEN")
+
+    if not all([account_id, database_id, api_token]):
+        return {"stored": False, "reason": "missing_cloudflare_env_vars"}
+
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/d1/database/{database_id}/query"
+    payload = json.dumps({
+        "sql": "INSERT OR REPLACE INTO gex_snapshots (session_date, gex_data_json) VALUES (?, ?)",
+        "params": [session_date, gex_data_json],
+    }).encode()
+
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            result = json.loads(resp.read().decode())
+        if result.get("success"):
+            return {"stored": True}
+        return {"stored": False, "reason": "d1_query_failed", "detail": result.get("errors")}
+    except urllib.error.HTTPError as e:
+        return {"stored": False, "reason": "http_error", "detail": f"{e.code}: {e.read().decode(errors='replace')}"}
+    except Exception as e:
+        return {"stored": False, "reason": "request_error", "detail": str(e)}
+
+
 def years_to_expiry(expiry_date_str, now_et):
     """Time to expiry in years, measured to 4:00pm ET on the expiry
     date, floored at MIN_T_SECONDS so it never hits zero/negative."""
@@ -432,6 +478,17 @@ class handler(BaseHTTPRequestHandler):
             if spot_price_corrected:
                 response_body["spot_price_raw"] = spot_price_raw
                 response_body["spot_price_corrected"] = True
+
+            # Persist the full snapshot (all strikes, not summarized) to
+            # D1, keyed by today's date - serialize before adding the
+            # storage-status fields below, so what gets stored is the
+            # clean snapshot itself, not the storage result describing it.
+            session_date = date.today().isoformat()
+            gex_data_json = json.dumps(response_body)
+            storage_result = save_snapshot_to_d1(session_date, gex_data_json)
+            response_body["stored"] = storage_result["stored"]
+            if not storage_result["stored"]:
+                response_body["storage_detail"] = storage_result
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
