@@ -364,8 +364,18 @@ def _fmt_usd(x, allow_none="Uncapped"):
 def _legs_str(legs) -> str:
     parts = []
     for leg in legs:
-        parts.append(f"{leg.action.title()} {leg.type} ${leg.strike:g}")
+        parts.append(f"{leg.action.title()} {leg.type} ${leg.strike:g} ({leg.expiry})")
     return " / ".join(parts)
+
+
+def _strategy_expiry_str(legs) -> str:
+    """Distinct expiries across a strategy's legs, in leg order. Usually a
+    single date; diagonals/calendars (Protocol Cake) can carry two."""
+    expiries = []
+    for leg in legs:
+        if leg.expiry not in expiries:
+            expiries.append(leg.expiry)
+    return " / ".join(expiries)
 
 
 # ---------- section builders ----------
@@ -474,7 +484,7 @@ def build_strategy_comparison(S, strategies):
 
 def build_sizing(S, strategies):
     S.append(Paragraph("Appendix B: Position Sizing, Profit Targets &amp; Stop-Losses", H1))
-    rows = [[_p("Strategy", CELLB), _p("Contracts", CELLB), _p("Max Loss", CELLB),
+    rows = [[_p("Strategy", CELLB), _p("Expiry", CELLB), _p("Contracts", CELLB), _p("Max Loss", CELLB),
              _p("Max Profit", CELLB), _p("50% Target", CELLB), _p("Stop-Loss", CELLB)]]
     for s in strategies:
         sizing = s.sizing
@@ -482,13 +492,14 @@ def build_sizing(S, strategies):
         sl = s.stop_loss
         rows.append([
             _p(s.name),
+            _p(_strategy_expiry_str(s.legs)),
             _p(sizing.contracts),
             _p(_fmt_usd(sizing.total_max_loss_usd)),
             _p(_fmt_usd(sizing.total_max_profit_usd)),
             _p(_fmt_usd(pt.total_profit_usd)),
             _p(_fmt_usd(sl.total_loss_at_stop_usd, allow_none="Monitor manually")),
         ])
-    S.append(_table(rows, [1.1*inch, 0.65*inch, 0.85*inch, 0.85*inch, 0.85*inch, 1.1*inch]))
+    S.append(_table(rows, [0.95*inch, 0.75*inch, 0.55*inch, 0.8*inch, 0.8*inch, 0.75*inch, 1.0*inch]))
     S.append(Spacer(1, 6))
     for s in strategies:
         S.append(Paragraph(
@@ -496,13 +507,20 @@ def build_sizing(S, strategies):
     S.append(Spacer(1, 4))
 
 
-def build_pop_ranking(S, pop_ranking):
+def build_pop_ranking(S, pop_ranking, strategies):
     S.append(PageBreak())
     S.append(Paragraph("Appendix C: Probability-of-Profit Ranking", H1))
-    rows = [[_p("Rank", CELLB), _p("Strategy", CELLB), _p("POP", CELLB), _p("Why", CELLB)]]
+    expiry_by_name = {s.name: _strategy_expiry_str(s.legs) for s in strategies}
+    rows = [[_p("Rank", CELLB), _p("Strategy", CELLB), _p("Expiry", CELLB), _p("POP", CELLB), _p("Why", CELLB)]]
     for entry in sorted(pop_ranking, key=lambda e: e.rank):
-        rows.append([_p(entry.rank), _p(entry.strategy_name), _p(f"{entry.pop_pct:g}%"), _p(entry.why)])
-    S.append(_table(rows, [0.45*inch, 1.5*inch, 0.6*inch, 3.65*inch]))
+        rows.append([
+            _p(entry.rank),
+            _p(entry.strategy_name),
+            _p(expiry_by_name.get(entry.strategy_name, "&mdash;")),
+            _p(f"{entry.pop_pct:g}%"),
+            _p(entry.why),
+        ])
+    S.append(_table(rows, [0.4*inch, 1.15*inch, 0.7*inch, 0.5*inch, 3.15*inch]))
     S.append(Spacer(1, 4))
 
 
@@ -547,7 +565,7 @@ def generate_pdf(output: ReasoningOutput, session_date: str, expiration: str,
     build_thesis(S, output.trade_thesis)
     build_strategy_comparison(S, output.strategies)
     build_sizing(S, output.strategies)
-    build_pop_ranking(S, output.pop_ranking)
+    build_pop_ranking(S, output.pop_ranking, output.strategies)
     build_day_over_day(S, output.day_over_day_comparison)
     build_footer(S)
     doc.build(S)
