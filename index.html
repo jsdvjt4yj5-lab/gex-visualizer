@@ -706,6 +706,35 @@ function renderChart(data) {
   // show everything rather than rendering a blank chart.
   if (plotLevels.length === 0) plotLevels = data.levels;
 
+  // Even within the +/-8% band, most $1-increment strikes carry
+  // near-zero GEX - only a handful actually cluster meaningful size.
+  // Trim to the contiguous window (levels are strike-ordered) that
+  // actually spans where the real signal sits, rather than making the
+  // reader scroll past dozens of flat bars to find it. Uses the same
+  // "value area around the dominant cluster" idea as the volume
+  // profile's POC/value-area calc, applied to |GEX| instead of volume.
+  const maxAbs = Math.max(...plotLevels.map((l) => Math.abs(l.net_gex_millions)), 0);
+  if (maxAbs > 0) {
+    // A strike counts as "meaningful" once it clears 3% of the band's
+    // largest wall - small enough to keep genuine secondary walls,
+    // large enough to drop the long tail of effectively-empty strikes.
+    const threshold = maxAbs * 0.03;
+    let firstMeaningful = plotLevels.findIndex((l) => Math.abs(l.net_gex_millions) >= threshold);
+    let lastMeaningful = plotLevels.length - 1 - [...plotLevels].reverse()
+      .findIndex((l) => Math.abs(l.net_gex_millions) >= threshold);
+    if (firstMeaningful !== -1 && lastMeaningful >= firstMeaningful) {
+      // Pad a couple strikes on each side for visual context (so the
+      // chart doesn't cut off abruptly right at the last real bar),
+      // clamped to the array bounds.
+      const pad = 2;
+      firstMeaningful = Math.max(0, firstMeaningful - pad);
+      lastMeaningful = Math.min(plotLevels.length - 1, lastMeaningful + pad);
+      plotLevels = plotLevels.slice(firstMeaningful, lastMeaningful + 1);
+    }
+    // else: nothing cleared the threshold (a genuinely flat/empty read) -
+    // fall through and keep the full band rather than plotting nothing.
+  }
+
   const labels = plotLevels.map((l) => '$' + l.strike);
   // Raw values can span multiple orders of magnitude near ATM (e.g. a
   // -3330M wall right next to a handful of single-digit-million strikes a
