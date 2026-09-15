@@ -2142,35 +2142,40 @@ async function fetchMacroEvents(sessionDate, expiration) {
     });
     if (!res.ok) {
       console.warn('Macro events fetch failed:', res.status);
-      return [];
+      return { ok: false, events: [] };
     }
     const { macro_events } = await res.json();
-    return Array.isArray(macro_events) ? macro_events : [];
+    return { ok: true, events: Array.isArray(macro_events) ? macro_events : [] };
   } catch (err) {
     console.warn('Macro events fetch error:', err);
-    return [];
+    return { ok: false, events: [] };
   }
 }
 
 const MACRO_CACHE_PREFIX = 'macroEventsCache_'; // + "YYYY-MM"
 
 // Fetches the full month's macro calendar (plus a ~10-day buffer into the
-// next month, since a session's expiration can land just past month-end)
-// and overwrites the cache for that month - used both on a cache miss and
-// by the manual "Refresh macro calendar" button.
+// next month, since a session's expiration can land just past month-end).
+// Only overwrites the cache when the fetch actually succeeded - a failed
+// or errored request must NOT be cached as "confirmed zero events",
+// otherwise one bad request poisons the whole month for every session
+// after it. A genuinely successful empty result (the model searched and
+// found nothing) is still cached as-is; that's a real answer, not a failure.
 async function fetchAndCacheMonth(monthKey) {
   const [y, m] = monthKey.split('-').map(Number);
   const monthStart = `${monthKey}-01`;
   const monthEndDate = new Date(Date.UTC(y, m, 10));
   const monthEnd = monthEndDate.toISOString().slice(0, 10);
 
-  const events = await fetchMacroEvents(monthStart, monthEnd);
-  try {
-    localStorage.setItem(MACRO_CACHE_PREFIX + monthKey, JSON.stringify({ fetched_at: new Date().toISOString(), events }));
-  } catch (e) {
-    // localStorage full/unavailable - fine, just won't cache this run
+  const { ok, events } = await fetchMacroEvents(monthStart, monthEnd);
+  if (ok) {
+    try {
+      localStorage.setItem(MACRO_CACHE_PREFIX + monthKey, JSON.stringify({ fetched_at: new Date().toISOString(), events }));
+    } catch (e) {
+      // localStorage full/unavailable - fine, just won't cache this run
+    }
   }
-  return events;
+  return { ok, events };
 }
 
 // Runs the macro event search at most once per calendar month - on a
@@ -2195,7 +2200,8 @@ async function getMacroEventsForSession(sessionDate, expiration) {
   }
 
   if (!monthEvents) {
-    monthEvents = await fetchAndCacheMonth(monthKey);
+    const result = await fetchAndCacheMonth(monthKey);
+    monthEvents = result.events; // if the fetch failed, this is [] and nothing was cached - next call retries
   }
 
   return monthEvents.filter((ev) => ev.date >= sessionDate && ev.date <= expiration);
@@ -2206,8 +2212,12 @@ async function refreshMacroCalendar() {
   ctRefreshMacroBtn.disabled = true;
   setCtStatus('Refreshing macro calendar for ' + monthKey + '...');
   try {
-    const events = await fetchAndCacheMonth(monthKey);
-    setCtStatus(`Macro calendar refreshed — ${events.length} event(s) found for ${monthKey}.`);
+    const { ok, events } = await fetchAndCacheMonth(monthKey);
+    if (ok) {
+      setCtStatus(`Macro calendar refreshed — ${events.length} event(s) found for ${monthKey}.`);
+    } else {
+      setCtStatus('Macro calendar refresh failed - the search request itself failed. Nothing was cached; try again.', true);
+    }
   } catch (err) {
     setCtStatus('Macro calendar refresh failed: ' + err.message, true);
   } finally {
