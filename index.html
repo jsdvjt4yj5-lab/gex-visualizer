@@ -2077,11 +2077,14 @@ function buildGexDataFromCurrent(data) {
 
 // Pulls the most recent SAVED snapshot for the same ticker from gex_history
 // that ISN'T the currently-loaded one, for day-over-day comparison.
-function buildPriorSnapshot(ticker) {
-  const existing = JSON.parse(localStorage.getItem('gex_history') || '[]');
-  const sameTicker = existing
-    .filter((s) => s.ticker === ticker)
-    .sort((a, b) => new Date(b.captured_at) - new Date(a.captured_at));
+// D1-backed as of the weekly/monthly migration - reuses
+// fetchSnapshotHistoryFromD1() so Coffee and Tea's day-over-day
+// comparison works across devices too, not just within one browser's
+// localStorage. A short lookback (10 days) is plenty since this only
+// ever needs the single most recent prior session.
+async function buildPriorSnapshot(ticker) {
+  const history = await fetchSnapshotHistoryFromD1(ticker, 10);
+  const sameTicker = history.sort((a, b) => new Date(b.captured_at) - new Date(a.captured_at));
   // Skip the first entry if it matches currentData's own captured_at (that's "today").
   const prior = sameTicker.find((s) => !currentData || s.captured_at !== currentData.captured_at);
   return prior ? buildGexDataFromCurrent(prior) : null;
@@ -2209,7 +2212,8 @@ async function runCoffeeAndTea() {
 
   try {
     const gexData = buildGexDataFromCurrent(currentData);
-    const priorSnapshot = buildPriorSnapshot(currentData.ticker);
+    setCtStatus('Checking for a prior session to compare against...');
+    const priorSnapshot = await buildPriorSnapshot(currentData.ticker);
     const flowData = buildFlowDataFromCurrent(currentFlowStats);
     const sessionDate = new Date().toISOString().slice(0, 10);
 
