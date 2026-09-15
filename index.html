@@ -103,7 +103,12 @@
 <div class="controls" style="margin-top:8px;">
   <button id="analyzeGexBtn" disabled>Generate GEX analysis</button>
 </div>
-<div id="analysisBox" style="display:none; margin-top:16px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+<div id="analysisBox" style="display:none; margin-top:16px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;">
+  <div id="analysisChartWrap" style="position:relative; width:100%; height:0; margin-bottom:0;">
+    <canvas id="analysisGammaChart" role="img" aria-label="Full GEX profile"></canvas>
+  </div>
+  <div id="analysisText"></div>
+</div>
 
 <div id="vpChartWrap" style="position:relative; width:100%; height:0; margin-top:16px;">
   <canvas id="vpChart" role="img" aria-label="Volume profile by price"></canvas>
@@ -248,6 +253,80 @@ const statusEl = document.getElementById('status');
 const chartWrap = document.getElementById('chartWrap');
 const historyList = document.getElementById('historyList');
 const analysisBox = document.getElementById('analysisBox');
+const analysisText = document.getElementById('analysisText');
+let analysisChartInstance = null;
+
+// Draws the fuller +/-8% GEX profile inside the written-analysis box -
+// separate from the compact cluster-trimmed chart above it, so the
+// analysis has more context to reference even though the main dashboard
+// chart stays tight and readable.
+function renderAnalysisGammaChart(data) {
+  const canvas = document.getElementById('analysisGammaChart');
+  if (!canvas) return;
+  if (!data) {
+    if (analysisChartInstance) { analysisChartInstance.destroy(); analysisChartInstance = null; }
+    document.getElementById('analysisChartWrap').style.height = '0';
+    return;
+  }
+
+  const spot = data.spot_price;
+  const band = 0.08;
+  let plotLevels = data.levels.filter(
+    (l) => l.strike >= spot * (1 - band) && l.strike <= spot * (1 + band)
+  );
+  if (plotLevels.length === 0) plotLevels = data.levels;
+
+  const labels = plotLevels.map((l) => '$' + l.strike);
+  const toDisplayScale = (v) => Math.sign(v) * Math.sqrt(Math.abs(v));
+  const fromDisplayScale = (v) => Math.sign(v) * v * v;
+  const values = plotLevels.map((l) => toDisplayScale(l.net_gex_millions));
+  const colors = plotLevels.map((l) =>
+    l.is_flip_zone ? '#eda100' : l.net_gex_millions >= 0 ? '#199e70' : '#e66767'
+  );
+
+  document.getElementById('analysisChartWrap').style.height =
+    Math.max(260, plotLevels.length * 20 + 40) + 'px';
+
+  if (analysisChartInstance) analysisChartInstance.destroy();
+
+  analysisChartInstance = new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{ data: values, backgroundColor: colors, borderRadius: 4, barThickness: 12 }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const v = plotLevels[ctx.dataIndex].net_gex_millions;
+              return (v < 0 ? '-' : '+') + '$' + Math.abs(v).toFixed(2) + 'M';
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          grid: { color: 'rgba(150,150,150,0.15)' },
+          ticks: {
+            color: '#999',
+            callback: (v) => {
+              const actual = fromDisplayScale(v);
+              return (actual < 0 ? '-' : '+') + '$' + Math.abs(actual).toFixed(0) + 'M';
+            },
+          },
+        },
+        y: { grid: { display: false }, ticks: { color: '#999', font: { size: 9 } } },
+      },
+    },
+  });
+}
+
 const maInfoBox = document.getElementById('maInfoBox');
 const vpInfoBox = document.getElementById('vpInfoBox');
 const vpChartWrap = document.getElementById('vpChartWrap');
@@ -590,8 +669,9 @@ async function generateStandaloneGexAnalysis() {
       const { analysis } = await analysisRes.json();
       currentAnalysis = analysis;
       currentData.analysis = analysis;
-      analysisBox.textContent = analysis;
+      analysisText.textContent = analysis;
       analysisBox.style.display = 'block';
+      renderAnalysisGammaChart(currentData);
       updateHistoryEntryAnalysis(currentData.captured_at, analysis);
       setStatus(`Analysis generated for ${currentData.ticker} — ${currentData.expiration}.`);
     } else {
@@ -845,10 +925,12 @@ function renderHistory() {
         vpChartWrap.style.height = '0';
       }
       if (currentAnalysis) {
-        analysisBox.textContent = currentAnalysis;
+        analysisText.textContent = currentAnalysis;
         analysisBox.style.display = 'block';
+        renderAnalysisGammaChart(currentData);
       } else {
         analysisBox.style.display = 'none';
+        renderAnalysisGammaChart(null);
       }
       pdfBtn.disabled = false;
       analyzeGexBtn.disabled = false;
@@ -2079,8 +2161,6 @@ async function runCoffeeAndTea() {
   }
 }
 
-let ctChartInstance = null;
-
 function ctSection(title, contentHtml) {
   return `<div style="margin-top:16px;">
     <h3 style="font-size:14px; color:#eda100; margin-bottom:6px;">${title}</h3>
@@ -2088,78 +2168,8 @@ function ctSection(title, contentHtml) {
   </div>`;
 }
 
-// Renders the GEX profile directly in the Coffee and Tea analysis panel,
-// using the fuller +/-8% band (skipClusterTrim) rather than the tighter
-// cluster view used on the main dashboard chart - this is the session's
-// own reference chart, so it favors showing more context over compactness.
-function renderCtGammaChart(data) {
-  if (!data) return;
-  const canvas = document.getElementById('ctGammaChart');
-  if (!canvas) return;
-
-  const spot = data.spot_price;
-  const band = 0.08;
-  let plotLevels = data.levels.filter(
-    (l) => l.strike >= spot * (1 - band) && l.strike <= spot * (1 + band)
-  );
-  if (plotLevels.length === 0) plotLevels = data.levels;
-
-  const labels = plotLevels.map((l) => '$' + l.strike);
-  const toDisplayScale = (v) => Math.sign(v) * Math.sqrt(Math.abs(v));
-  const fromDisplayScale = (v) => Math.sign(v) * v * v;
-  const values = plotLevels.map((l) => toDisplayScale(l.net_gex_millions));
-  const colors = plotLevels.map((l) =>
-    l.is_flip_zone ? '#eda100' : l.net_gex_millions >= 0 ? '#199e70' : '#e66767'
-  );
-
-  canvas.parentElement.style.height = Math.max(300, plotLevels.length * 22 + 60) + 'px';
-
-  if (ctChartInstance) ctChartInstance.destroy();
-
-  ctChartInstance = new Chart(canvas, {
-    type: 'bar',
-    data: {
-      labels,
-      datasets: [{ data: values, backgroundColor: colors, borderRadius: 4, barThickness: 14 }],
-    },
-    options: {
-      indexAxis: 'y',
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            label: (ctx) => {
-              const v = plotLevels[ctx.dataIndex].net_gex_millions;
-              return (v < 0 ? '-' : '+') + '$' + Math.abs(v).toFixed(2) + 'M';
-            },
-          },
-        },
-      },
-      scales: {
-        x: {
-          grid: { color: 'rgba(150,150,150,0.15)' },
-          ticks: {
-            color: '#999',
-            callback: (v) => {
-              const actual = fromDisplayScale(v);
-              return (actual < 0 ? '-' : '+') + '$' + Math.abs(actual).toFixed(0) + 'M';
-            },
-          },
-        },
-        y: { grid: { display: false }, ticks: { color: '#999', font: { size: 10 } } },
-      },
-    },
-  });
-}
-
 function renderCtOutput(o) {
   let html = '';
-
-  html += ctSection('GEX Profile', `
-    <div style="position:relative; width:100%;"><canvas id="ctGammaChart"></canvas></div>
-  `);
 
   html += ctSection('Market Structure', `
     <p>${o.market_structure.summary}</p>
@@ -2237,7 +2247,6 @@ function renderCtOutput(o) {
   html += `<p style="margin-top:16px; font-size:11px; color:#666;">All figures illustrative unless pricing_source is "live_chain". Not financial advice. GEX walls are dealer-hedging mechanics, not guarantees.</p>`;
 
   ctOutput.innerHTML = html;
-  renderCtGammaChart(currentData);
 }
 
 async function downloadCoffeeAndTeaPdf() {
