@@ -707,7 +707,17 @@ function renderChart(data) {
   if (plotLevels.length === 0) plotLevels = data.levels;
 
   const labels = plotLevels.map((l) => '$' + l.strike);
-  const values = plotLevels.map((l) => l.net_gex_millions);
+  // Raw values can span multiple orders of magnitude near ATM (e.g. a
+  // -3330M wall right next to a handful of single-digit-million strikes a
+  // few dollars away) - plotted linearly, Chart.js scales the axis to fit
+  // the biggest bar and everything else visually collapses to a hairline.
+  // A signed sqrt transform compresses that range while preserving sign
+  // and relative ordering, so smaller-but-still-meaningful walls stay
+  // visible. Tooltips and axis ticks below un-transform back to real $M
+  // for display - only the bar LENGTH uses the compressed scale.
+  const toDisplayScale = (v) => Math.sign(v) * Math.sqrt(Math.abs(v));
+  const fromDisplayScale = (v) => Math.sign(v) * v * v;
+  const values = plotLevels.map((l) => toDisplayScale(l.net_gex_millions));
   const colors = plotLevels.map((l) =>
     l.is_flip_zone ? '#eda100' : l.net_gex_millions >= 0 ? '#199e70' : '#e66767'
   );
@@ -731,7 +741,9 @@ function renderChart(data) {
         tooltip: {
           callbacks: {
             label: (ctx) => {
-              const v = ctx.raw;
+              // Look up the real (untransformed) value rather than ctx.raw,
+              // which is now in compressed display-scale.
+              const v = plotLevels[ctx.dataIndex].net_gex_millions;
               return (v < 0 ? '-' : '+') + '$' + Math.abs(v).toFixed(2) + 'M';
             },
           },
@@ -746,7 +758,13 @@ function renderChart(data) {
       scales: {
         x: {
           grid: { color: 'rgba(150,150,150,0.15)' },
-          ticks: { color: '#999', callback: (v) => (v < 0 ? '-' : '+') + '$' + Math.abs(v) + 'M' },
+          ticks: {
+            color: '#999',
+            callback: (v) => {
+              const actual = fromDisplayScale(v);
+              return (actual < 0 ? '-' : '+') + '$' + Math.abs(actual).toFixed(0) + 'M';
+            },
+          },
         },
         y: { grid: { display: false }, ticks: { color: '#999' } },
       },
