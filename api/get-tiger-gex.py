@@ -140,7 +140,7 @@ def get_config_float(env_name, default):
         return default
 
 
-def save_snapshot_to_d1(session_date, gex_data_json):
+def save_snapshot_to_d1(ticker, session_date, gex_data_json):
     """Best-effort write of the full daily GEX snapshot to Cloudflare D1,
     via D1's HTTP query API (no extra dependency - reuses urllib like
     get_spot_price() above). Storage is a nice-to-have persistence layer
@@ -184,8 +184,8 @@ def save_snapshot_to_d1(session_date, gex_data_json):
 
     url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/d1/database/{database_id}/query"
     payload = json.dumps({
-        "sql": "INSERT OR REPLACE INTO gex_snapshots (session_date, gex_data_json) VALUES (?, ?)",
-        "params": [session_date, gex_data_json],
+        "sql": "INSERT OR REPLACE INTO gex_snapshots (ticker, session_date, gex_data_json) VALUES (?, ?, ?)",
+        "params": [ticker, session_date, gex_data_json],
     }).encode()
 
     req = urllib.request.Request(
@@ -508,7 +508,7 @@ class handler(BaseHTTPRequestHandler):
             # clean snapshot itself, not the storage result describing it.
             session_date = date.today().isoformat()
             gex_data_json = json.dumps(response_body)
-            storage_result = save_snapshot_to_d1(session_date, gex_data_json)
+            storage_result = save_snapshot_to_d1(symbol, session_date, gex_data_json)
             response_body["stored"] = storage_result["stored"]
             if not storage_result["stored"]:
                 response_body["storage_detail"] = storage_result

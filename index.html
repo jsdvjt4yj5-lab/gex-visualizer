@@ -936,52 +936,89 @@ function renderHistory() {
   updateWeeklyButtonState();
 }
 
-function updateWeeklyButtonState() {
-  const eligible = getEligibleSnapshotsForWeekly();
+async function fetchSnapshotHistoryFromD1(ticker, days) {
+  try {
+    const res = await fetch(`/api/get-snapshot-history?ticker=${encodeURIComponent(ticker)}&days=${days}`);
+    if (!res.ok) return [];
+    const { snapshots } = await res.json();
+    if (!Array.isArray(snapshots)) return [];
+    // Trading days only - excludes Sat/Sun. Does NOT exclude US market
+    // holidays (Thanksgiving, July 4th, etc.) since that needs a
+    // maintained holiday calendar this doesn't have; a holiday snapshot
+    // would only appear here if a pull was actually attempted that day; in
+    // practice Tiger pulls on non-trading days come back with flat/zero
+    // gamma anyway (documented limitation), so this mainly guards against
+    // an accidental weekend pull skewing the weekly/monthly window.
+    return snapshots.filter((s) => {
+      const day = new Date(s.captured_at).getUTCDay();
+      return day !== 0 && day !== 6; // 0 = Sunday, 6 = Saturday
+    });
+  } catch (err) {
+    console.warn('Snapshot history fetch error:', err);
+    return [];
+  }
+}
+
+async function updateWeeklyButtonState() {
+  weeklyBtn.disabled = true;
+  monthlyBtn.disabled = true;
+  weeklyBtn.textContent = 'Checking history...';
+  monthlyBtn.textContent = 'Checking history...';
+
+  const [eligible, monthlyEligible] = await Promise.all([
+    getEligibleSnapshotsForWeekly(),
+    getEligibleSnapshotsForMonthly(),
+  ]);
+
   weeklyBtn.disabled = eligible.length < 2;
   weeklyBtn.textContent = eligible.length < 2
     ? 'Generate weekly read (need 2+ same-ticker snapshots)'
     : `Generate weekly read (${eligible.length} snapshots)`;
 
-  const monthlyEligible = getEligibleSnapshotsForMonthly();
   monthlyBtn.disabled = monthlyEligible.length < 5;
   monthlyBtn.textContent = monthlyEligible.length < 5
     ? 'Generate monthly read (need 5+ same-ticker snapshots)'
     : `Generate monthly read (${monthlyEligible.length} snapshots)`;
 }
 
-function getEligibleSnapshotsForWeekly() {
-  const existing = JSON.parse(localStorage.getItem('gex_history') || '[]');
+// D1 (via get-snapshot-history.js) is the single source of truth for
+// weekly/monthly reads - every snapshot source (parse-gex.js screenshot
+// parses, get-tiger-gex.py Tiger pulls) writes to the same gex_snapshots
+// table, so this sees history from any device, not just this browser's
+// localStorage.
+async function getEligibleSnapshotsForWeekly() {
   const ticker = tickerFilter.value;
   if (!ticker) return [];
+  const history = await fetchSnapshotHistoryFromD1(ticker, 35);
   // Same ticker, same expiration column, oldest to newest, most recent 7.
-  const sameTicker = existing.filter((i) => i.ticker === ticker);
   const expirations = {};
-  sameTicker.forEach((s) => {
+  history.forEach((s) => {
     expirations[s.expiration] = (expirations[s.expiration] || 0) + 1;
   });
   const mostCommonExp = Object.entries(expirations).sort((a, b) => b[1] - a[1])[0]?.[0];
-  return sameTicker
+  return history
     .filter((s) => s.expiration === mostCommonExp)
     .sort((a, b) => new Date(a.captured_at) - new Date(b.captured_at))
     .slice(-7);
 }
 
-function getEligibleSnapshotsForMonthly() {
-  const existing = JSON.parse(localStorage.getItem('gex_history') || '[]');
+async function getEligibleSnapshotsForMonthly() {
   const ticker = tickerFilter.value;
   if (!ticker) return [];
   // Same ticker only - NOT locked to one expiration, since a month
   // naturally spans several weekly/monthly expiration cycles. Most
-  // recent 22 snapshots (~ a trading month).
-  return existing
-    .filter((s) => s.ticker === ticker)
+  // recent 22 snapshots (~ a trading month). Lookback widened to 45
+  // calendar days (from 35) since weekday-only filtering now drops
+  // roughly 2 of every 7 days, and 45 calendar days comfortably clears
+  // 22 trading days even with a holiday or two in the window.
+  const history = await fetchSnapshotHistoryFromD1(ticker, 45);
+  return history
     .sort((a, b) => new Date(a.captured_at) - new Date(b.captured_at))
     .slice(-22);
 }
 
 async function generateMonthlyRead() {
-  const snapshots = getEligibleSnapshotsForMonthly();
+  const snapshots = await getEligibleSnapshotsForMonthly();
   if (snapshots.length < 5) return;
 
   monthlyBtn.disabled = true;
@@ -1116,7 +1153,7 @@ async function downloadMonthlyPdf() {
 }
 
 async function generateWeeklyRead() {
-  const snapshots = getEligibleSnapshotsForWeekly();
+  const snapshots = await getEligibleSnapshotsForWeekly();
   if (snapshots.length < 2) return;
 
   weeklyBtn.disabled = true;

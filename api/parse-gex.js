@@ -55,6 +55,55 @@ Rules:
 - Do not include a "is_flip_zone" field — the frontend computes that.`;
 };
 
+// Best-effort write of the full parsed snapshot to Cloudflare D1, so
+// screenshot-sourced snapshots land in the same gex_snapshots table as
+// Tiger-pull snapshots (get-tiger-gex.py) - D1 is the single source of
+// truth for weekly/monthly reads (see get-snapshot-history.js), so every
+// snapshot source needs to write here. Mirrors the Python version's
+// schema (ticker, session_date, gex_data_json - composite primary key on
+// ticker+session_date) and its "never block the real response" contract:
+// any failure here is caught and reported back as {"stored": false, ...},
+// never thrown.
+async function saveSnapshotToD1(ticker, sessionDate, gexDataJson) {
+  const accountId = (process.env.CLOUDFLARE_ACCOUNT_ID || '').trim();
+  const databaseId = (process.env.CLOUDFLARE_D1_DATABASE_ID || '').trim();
+  const apiToken = (process.env.CLOUDFLARE_API_TOKEN || '').trim();
+
+  if (!accountId || !databaseId || !apiToken) {
+    return { stored: false, reason: 'missing_cloudflare_env_vars' };
+  }
+
+  try {
+    const d1Res = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${databaseId}/query`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          sql: 'INSERT OR REPLACE INTO gex_snapshots (ticker, session_date, gex_data_json) VALUES (?, ?, ?)',
+          params: [ticker, sessionDate, gexDataJson],
+        }),
+      }
+    );
+
+    if (!d1Res.ok) {
+      const detail = await d1Res.text();
+      return { stored: false, reason: 'http_error', detail };
+    }
+
+    const result = await d1Res.json();
+    if (result.success) {
+      return { stored: true };
+    }
+    return { stored: false, reason: 'd1_query_failed', detail: result.errors };
+  } catch (err) {
+    return { stored: false, reason: 'request_error', detail: String(err) };
+  }
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Use POST' });
@@ -189,6 +238,21 @@ export default async function handler(req, res) {
       }
     }
     parsed.levels = sorted;
+
+    // Persist to D1 - serialize before appending storage-status fields,
+    // so what's stored is the clean snapshot, not the status describing it.
+    if (parsed.ticker && parsed.ticker !== 'UNKNOWN') {
+      const sessionDate = new Date().toISOString().slice(0, 10);
+      const gexDataJson = JSON.stringify(parsed);
+      const storageResult = await saveSnapshotToD1(parsed.ticker, sessionDate, gexDataJson);
+      parsed.stored = storageResult.stored;
+      if (!storageResult.stored) {
+        parsed.storage_detail = storageResult;
+      }
+    } else {
+      parsed.stored = false;
+      parsed.storage_detail = { stored: false, reason: 'ticker_unknown' };
+    }
 
     return res.status(200).json(parsed);
   } catch (err) {
