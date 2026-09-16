@@ -371,6 +371,7 @@
 </div>
 <div class="status" id="chartAnalysisStatus"></div>
 <div id="chartAnalysisOutput" style="margin-top:12px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd; display:none;"></div>
+<button id="chartAnalysisPdfBtn" style="margin-top:12px;">Download PDF</button>
 </div>
 
 </div>
@@ -915,6 +916,56 @@ const chartAnalysisTickerInput = document.getElementById('chartAnalysisTickerInp
 const chartAnalysisBtn = document.getElementById('chartAnalysisBtn');
 const chartAnalysisStatus = document.getElementById('chartAnalysisStatus');
 const chartAnalysisOutput = document.getElementById('chartAnalysisOutput');
+const chartAnalysisPdfBtn = document.getElementById('chartAnalysisPdfBtn');
+let currentChartAnalysis = null;
+
+// Renders **bold** markdown from the AI's response as real bold text
+// inside a jsPDF doc, word-wrapping (and paragraph-breaking on blank
+// lines) as it goes, rather than dumping literal asterisks the way
+// chartAnalysisOutput.textContent does on the page. Returns the y
+// position after the last line, so callers can keep laying out content
+// beneath it.
+function renderFormattedText(doc, text, x, yStart, maxWidth, lineHeight, margin) {
+  let y = yStart;
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const paragraphs = text.split(/\n\s*\n/);
+  const spaceWidth = doc.getTextWidth(' ');
+
+  paragraphs.forEach((para, pi) => {
+    let curX = x;
+    const segments = para.split('**');
+    segments.forEach((seg, i) => {
+      const bold = i % 2 === 1; // text between ** ** pairs
+      doc.setFont(undefined, bold ? 'bold' : 'normal');
+      const words = seg.split(/\s+/).filter((w) => w.length > 0);
+      words.forEach((word) => {
+        const wWidth = doc.getTextWidth(word);
+        if (curX > x && curX + spaceWidth + wWidth > x + maxWidth) {
+          y += lineHeight;
+          curX = x;
+          if (y > pageHeight - margin) {
+            doc.addPage();
+            y = margin;
+          }
+        } else if (curX > x) {
+          curX += spaceWidth;
+        }
+        doc.text(word, curX, y);
+        curX += wWidth;
+      });
+    });
+    if (pi < paragraphs.length - 1) {
+      y += lineHeight + 6;
+      if (y > pageHeight - margin) {
+        doc.addPage();
+        y = margin;
+      }
+    }
+  });
+
+  doc.setFont(undefined, 'normal');
+  return y + lineHeight;
+}
 
 async function generateChartAnalysis() {
   const ticker = (chartAnalysisTickerInput.value || 'SPY').toUpperCase().trim();
@@ -931,14 +982,70 @@ async function generateChartAnalysis() {
     chartAnalysisOutput.textContent = data.analysis;
     chartAnalysisOutput.style.display = 'block';
     chartAnalysisStatus.textContent = `${data.bars_used} daily bars used (${data.date_range?.[0]} to ${data.date_range?.[1]}).`;
+    currentChartAnalysis = {
+      ticker,
+      analysis: data.analysis,
+      bars_used: data.bars_used,
+      date_range: data.date_range,
+    };
   } catch (err) {
     chartAnalysisStatus.textContent = 'Chart analysis failed: ' + err.message;
     chartAnalysisStatus.className = 'status error';
+    currentChartAnalysis = null;
   } finally {
     chartAnalysisBtn.disabled = false;
   }
 }
 chartAnalysisBtn.addEventListener('click', generateChartAnalysis);
+
+async function downloadChartAnalysisPdf() {
+  if (!currentChartAnalysis) return;
+  chartAnalysisPdfBtn.disabled = true;
+
+  try {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const margin = 48;
+    let y = margin;
+
+    doc.setFontSize(16);
+    doc.setFont(undefined, 'bold');
+    doc.text(`${currentChartAnalysis.ticker} Chart Analysis`, margin, y);
+    y += 20;
+
+    doc.setFontSize(10);
+    doc.setFont(undefined, 'normal');
+    doc.setTextColor(100);
+    const [from, to] = currentChartAnalysis.date_range || [];
+    const meta = `${currentChartAnalysis.bars_used} daily bars` +
+      (from && to ? ` · ${from} to ${to}` : '');
+    doc.text(meta, margin, y);
+    y += 24;
+    doc.setTextColor(0);
+
+    doc.setFontSize(12);
+    doc.setFont(undefined, 'bold');
+    doc.text('Analysis', margin, y);
+    y += 16;
+
+    doc.setFontSize(10.5);
+    y = renderFormattedText(doc, currentChartAnalysis.analysis, margin, y, pageWidth - margin * 2, 14, margin);
+
+    doc.setFontSize(8);
+    doc.setTextColor(150);
+    doc.text(
+      'AI-written technical read of price action only - separate from the GEX-based reads. Not financial advice.',
+      margin,
+      doc.internal.pageSize.getHeight() - 24
+    );
+
+    doc.save(`${currentChartAnalysis.ticker}_Chart_Analysis.pdf`);
+  } finally {
+    chartAnalysisPdfBtn.disabled = false;
+  }
+}
+chartAnalysisPdfBtn.addEventListener('click', downloadChartAnalysisPdf);
 
 async function processGexData(data) {
   currentData = data;
