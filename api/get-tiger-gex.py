@@ -209,6 +209,43 @@ def save_snapshot_to_d1(ticker, session_date, gex_data_json):
         return {"stored": False, "reason": "request_error", "detail": str(e)}
 
 
+def fetch_prior_snapshot_from_d1(ticker, before_date):
+    """Best-effort read of the most recent prior snapshot for this ticker,
+    used only for the day-over-day sanity check below. Returns None on
+    any failure (missing env vars, network error, no prior row) - this
+    check is a nice-to-have, never something that should block or fail
+    the actual GEX response.
+    """
+    import urllib.request
+    import urllib.error
+
+    account_id = (os.environ.get("CLOUDFLARE_ACCOUNT_ID") or "").strip()
+    database_id = (os.environ.get("CLOUDFLARE_D1_DATABASE_ID") or "").strip()
+    api_token = (os.environ.get("CLOUDFLARE_API_TOKEN") or "").strip()
+    if not all([account_id, database_id, api_token]):
+        return None
+
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/d1/database/{database_id}/query"
+    payload = json.dumps({
+        "sql": "SELECT gex_data_json FROM gex_snapshots WHERE ticker = ? AND session_date < ? ORDER BY session_date DESC LIMIT 1",
+        "params": [ticker, before_date],
+    }).encode()
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            result = json.loads(resp.read().decode())
+        rows = result.get("result", [{}])[0].get("results", [])
+        if not rows:
+            return None
+        return json.loads(rows[0]["gex_data_json"])
+    except Exception:
+        return None
+
+
 def years_to_expiry(expiry_date_str, now_et):
     """Time to expiry in years, measured to 4:00pm ET on the expiry
     date, floored at MIN_T_SECONDS so it never hits zero/negative."""
@@ -339,6 +376,8 @@ class handler(BaseHTTPRequestHandler):
                 used_rows = 0
                 used_fallback_iv_rows = 0  # rows where per-contract iv was unusable and underlying_iv was substituted
                 sample_rows = []  # a few raw (pre-conversion) values, for debugging
+                seen_contracts = set()   # (strike, put_call) pairs already processed this expiry
+                duplicate_rows = 0       # same contract appearing more than once - data-quality red flag
 
                 day_had_data = False
                 for _, row in chain.iterrows():
@@ -385,6 +424,12 @@ class handler(BaseHTTPRequestHandler):
                         iv = underlying_iv
                         used_fallback_iv_rows += 1
 
+                    contract_key = (strike, row["put_call"])
+                    if contract_key in seen_contracts:
+                        duplicate_rows += 1
+                        continue  # don't double-count gamma exposure for a contract already processed
+                    seen_contracts.add(contract_key)
+
                     if strike not in by_strike:
                         by_strike[strike] = 0.0
                     gamma = bs_gamma(spot, strike, t_years, iv, risk_free_rate, dividend_yield)
@@ -395,6 +440,20 @@ class handler(BaseHTTPRequestHandler):
                     if abs(contract_gex) >= 1:  # ignore dust-level contributions when checking "had data"
                         day_had_data = True
                         used_rows += 1
+                    # SIGN CONVENTION (explicit, written contract - audited Sept 2026):
+                    # this is "Model A" per Chilingarian (2026, SSRN 7131778) - the
+                    # SqueezeMetrics open-interest proxy. Calls contribute +gamma,
+                    # puts contribute -gamma, which assumes dealers are net long the
+                    # calls and net short the puts customers hold. Black-Scholes
+                    # gamma itself is identical and positive for a call and put at
+                    # the same strike (put-call parity) - the sign here is NOT a
+                    # property of the option Greek, it is this stated inventory
+                    # assumption. This is a proxy for dealer positioning inferred
+                    # from open interest, not a direct observation of the dealer
+                    # book - direct-data research (Amaya et al. 2025) finds this
+                    # assumption is frequently wrong for SPX specifically. Model A
+                    # is used here deliberately and consistently; if this ever
+                    # changes, every downstream regime read inverts silently.
                     if row["put_call"] == "CALL":
                         by_strike[strike] += contract_gex
                     elif row["put_call"] == "PUT":
@@ -409,6 +468,7 @@ class handler(BaseHTTPRequestHandler):
                     "skipped_nan": skipped_nan,
                     "skipped_conversion_error": skipped_conversion_error,
                     "skipped_gamma_failed": skipped_gamma_failed,
+                    "duplicate_rows": duplicate_rows,
                     "sample_rows": sample_rows,
                 }
 
@@ -475,6 +535,107 @@ class handler(BaseHTTPRequestHandler):
                     spot_price_final = median_strike
                     spot_price_corrected = True
 
+            # ---- DATA QUALITY CHECKS ----
+            # Aggregate, human-readable pass/warn checks on top of the raw
+            # per-expiry diagnostics above - the goal is that a bad fetch
+            # is visibly flagged in the response itself, not something you
+            # have to notice by manually reading diagnostics.
+            data_quality = {}
+
+            # 1. Market hours - Tiger's gamma/OI are documented to come
+            # back flat outside active trading hours (see README known
+            # limitation). A fetch outside 9:30-16:00 ET on a weekday is
+            # not necessarily bad, but its numbers should be trusted less.
+            is_weekday = now_et.weekday() < 5
+            market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+            market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+            in_market_hours = is_weekday and market_open <= now_et <= market_close
+            data_quality["market_hours"] = {
+                "status": "pass" if in_market_hours else "warn",
+                "detail": None if in_market_hours else
+                    f"Fetched at {now_et.strftime('%H:%M %Z')} on a "
+                    f"{'weekday' if is_weekday else 'weekend'}, outside 9:30-16:00 ET - "
+                    f"gamma/OI are known to come back flat outside market hours.",
+            }
+
+            # 2. IV fallback rate - Tiger's per-contract implied_vol is a
+            # known-broken field (documented above); this makes that
+            # visible as a top-level check instead of only in gamma_inputs.
+            total_used = sum(d["used_rows"] for d in diagnostics.values())
+            total_fallback = sum(d["used_fallback_iv_rows"] for d in diagnostics.values())
+            fallback_rate_pct = round(100 * total_fallback / total_used, 1) if total_used else 0.0
+            data_quality["iv_fallback_rate"] = {
+                "status": "warn" if fallback_rate_pct >= 95 else "pass",
+                "fallback_rate_pct": fallback_rate_pct,
+                "detail": "Nearly all rows used the flat underlying-level IV fallback - "
+                          "strike-to-strike vol skew is not reflected in this gamma calc."
+                          if fallback_rate_pct >= 95 else None,
+            }
+
+            # 3. Coverage - flags a chain that technically returned rows
+            # but barely any usable data made it through (thin/illiquid
+            # chain, or a fetch that silently mostly failed).
+            MIN_EXPECTED_USED_ROWS = 20
+            data_quality["coverage"] = {
+                "status": "warn" if total_used < MIN_EXPECTED_USED_ROWS else "pass",
+                "total_used_rows": total_used,
+                "detail": f"Only {total_used} usable contract rows across all fetched "
+                          f"expiries - unusually thin, treat this snapshot cautiously."
+                          if total_used < MIN_EXPECTED_USED_ROWS else None,
+            }
+
+            # 4. Duplicate contracts - the same (strike, put/call) appearing
+            # more than once within an expiry is a red flag for a corrupted
+            # or double-counted fetch. Rows are already de-duplicated
+            # before being summed (see the per-row loop above); this just
+            # surfaces that it happened.
+            total_duplicates = sum(d["duplicate_rows"] for d in diagnostics.values())
+            data_quality["duplicate_rows"] = {
+                "status": "warn" if total_duplicates > 0 else "pass",
+                "count": total_duplicates,
+                "detail": f"{total_duplicates} duplicate (strike, put/call) row(s) found and "
+                          f"skipped after the first occurrence - Tiger's chain data may be "
+                          f"inconsistent this fetch." if total_duplicates > 0 else None,
+            }
+
+            # 5. Day-over-day sanity - compare against the most recent
+            # prior D1 snapshot for this ticker. A huge, implausible jump
+            # in spot or total |GEX| is more often bad data than a real
+            # market move, and is worth flagging even though it's best-
+            # effort (skipped entirely if no prior snapshot or D1 is
+            # unreachable, rather than blocking the response).
+            # Uses `today` (already computed from now_et above, i.e. the
+            # US Eastern trading date) rather than date.today() (server
+            # local time / UTC on Vercel) - the two disagree for roughly
+            # 8pm-midnight ET each day, when UTC has already rolled to the
+            # next calendar date but the ET trading day hasn't. Using the
+            # wrong one here would compare against - or later overwrite -
+            # the wrong day's snapshot.
+            prior_snapshot = fetch_prior_snapshot_from_d1(symbol, today.isoformat())
+            if prior_snapshot and prior_snapshot.get("levels"):
+                prior_spot = prior_snapshot.get("spot_price")
+                prior_total_gex = sum(abs(l["net_gex_millions"]) for l in prior_snapshot["levels"])
+                current_total_gex = sum(abs(l["net_gex_millions"]) for l in levels)
+                spot_change_pct = (abs(spot_price_final - prior_spot) / prior_spot * 100) if prior_spot else None
+                gex_ratio = (current_total_gex / prior_total_gex) if prior_total_gex > 0 else None
+                spot_jump_flag = spot_change_pct is not None and spot_change_pct > 8
+                gex_jump_flag = gex_ratio is not None and (gex_ratio > 5 or gex_ratio < 0.2)
+                data_quality["day_over_day"] = {
+                    "status": "warn" if (spot_jump_flag or gex_jump_flag) else "pass",
+                    "prior_session_date": prior_snapshot.get("captured_at", "")[:10] or None,
+                    "spot_change_pct": round(spot_change_pct, 2) if spot_change_pct is not None else None,
+                    "total_abs_gex_ratio_vs_prior": round(gex_ratio, 2) if gex_ratio is not None else None,
+                    "detail": "Spot or total GEX magnitude moved implausibly versus the last "
+                              "stored snapshot - could be a real move, but worth a manual check "
+                              "before trusting this read." if (spot_jump_flag or gex_jump_flag) else None,
+                }
+            else:
+                data_quality["day_over_day"] = {"status": "unavailable", "detail": "No prior snapshot found for comparison."}
+
+            data_quality["overall"] = "warn" if any(
+                v.get("status") == "warn" for v in data_quality.values() if isinstance(v, dict)
+            ) else "pass"
+
             response_body = {
                 "ticker": symbol,
                 "spot_price": spot_price_final,
@@ -485,6 +646,7 @@ class handler(BaseHTTPRequestHandler):
                 "read_type": read_type,
                 "source": "tiger",  # distinguishes this from screenshot-sourced data
                 "gamma_method": "black_scholes_local",  # gamma is computed locally, not read from Tiger (see header comment)
+                "dealer_positioning_convention": "model_a_squeezemetrics_proxy",  # inferred from OI, not observed - see sign-convention comment above
                 "strike_band_pct": strike_band_pct,
                 "strike_range_fetched": [round(strike_low, 2), round(strike_high, 2)],
                 "gamma_inputs": {
@@ -495,6 +657,7 @@ class handler(BaseHTTPRequestHandler):
                     "note": "Per-contract implied_vol from Tiger's chain endpoint is currently coming back as 0.0 for every row (confirmed in testing, undocumented by Tiger) - this flat underlying-level IV is substituted whenever that happens. This loses strike-to-strike vol skew.",
                 },
                 "diagnostics": diagnostics,
+                "data_quality": data_quality,
             }
             if expiries_empty:
                 response_body["expirations_skipped_empty"] = expiries_empty
@@ -503,10 +666,14 @@ class handler(BaseHTTPRequestHandler):
                 response_body["spot_price_corrected"] = True
 
             # Persist the full snapshot (all strikes, not summarized) to
-            # D1, keyed by today's date - serialize before adding the
-            # storage-status fields below, so what gets stored is the
-            # clean snapshot itself, not the storage result describing it.
-            session_date = date.today().isoformat()
+            # D1, keyed by today's US Eastern trading date (NOT
+            # date.today(), which is server-local/UTC and disagrees with
+            # ET for part of every evening - see the day-over-day comment
+            # above for why that distinction matters here) - serialize
+            # before adding the storage-status fields below, so what gets
+            # stored is the clean snapshot itself, not the storage result
+            # describing it.
+            session_date = today.isoformat()
             gex_data_json = json.dumps(response_body)
             storage_result = save_snapshot_to_d1(symbol, session_date, gex_data_json)
             response_body["stored"] = storage_result["stored"]

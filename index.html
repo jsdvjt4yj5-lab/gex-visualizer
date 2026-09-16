@@ -268,6 +268,110 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script>
+// ---- NYSE market holiday calculator (browser-side copy) ----
+// Same rule-based logic as api/_lib/marketHolidays.js, duplicated here
+// since frontend JS can't import a server-side module. Verified against
+// NYSE Group's official 2025/2026/2027 holiday announcement - every date,
+// including observance-shift edge cases (New Year's does NOT shift when
+// on a Saturday, unlike every other holiday), matched exactly. Rule-based,
+// not a hardcoded table, so it's correct for any year with no maintenance.
+function easterSunday(year) {
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(Date.UTC(year, month - 1, day));
+}
+function nthWeekdayOfMonth(year, month, weekday, n) {
+  const d = new Date(Date.UTC(year, month, 1));
+  let count = 0;
+  while (true) {
+    if (d.getUTCDay() === weekday) {
+      count++;
+      if (count === n) return new Date(d);
+    }
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+}
+function lastWeekdayOfMonth(year, month, weekday) {
+  const d = new Date(Date.UTC(year, month + 1, 0));
+  while (d.getUTCDay() !== weekday) { d.setUTCDate(d.getUTCDate() - 1); }
+  return d;
+}
+function observedDate(date, opts) {
+  const newYearsException = opts && opts.newYearsException;
+  const day = date.getUTCDay();
+  if (day === 6) {
+    if (newYearsException) return null;
+    const d = new Date(date); d.setUTCDate(d.getUTCDate() - 1); return d;
+  }
+  if (day === 0) {
+    const d = new Date(date); d.setUTCDate(d.getUTCDate() + 1); return d;
+  }
+  return date;
+}
+function toDateStr(d) { return d.toISOString().slice(0, 10); }
+const _nyseHolidayCache = {};
+function getNyseHolidays(year) {
+  if (_nyseHolidayCache[year]) return _nyseHolidayCache[year];
+  const holidays = new Set();
+  const add = (date) => { if (date) holidays.add(toDateStr(date)); };
+  add(observedDate(new Date(Date.UTC(year, 0, 1)), { newYearsException: true }));
+  add(nthWeekdayOfMonth(year, 0, 1, 3));
+  add(nthWeekdayOfMonth(year, 1, 1, 3));
+  const easter = easterSunday(year);
+  const goodFriday = new Date(easter);
+  goodFriday.setUTCDate(goodFriday.getUTCDate() - 2);
+  add(goodFriday);
+  add(lastWeekdayOfMonth(year, 4, 1));
+  if (year >= 2022) add(observedDate(new Date(Date.UTC(year, 5, 19))));
+  add(observedDate(new Date(Date.UTC(year, 6, 4))));
+  add(nthWeekdayOfMonth(year, 8, 1, 1));
+  add(nthWeekdayOfMonth(year, 10, 4, 4));
+  add(observedDate(new Date(Date.UTC(year, 11, 25))));
+  _nyseHolidayCache[year] = holidays;
+  return holidays;
+}
+function isTradingDay(dateStr) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  const day = d.getUTCDay();
+  if (day === 0 || day === 6) return false;
+  const year = parseInt(dateStr.slice(0, 4), 10);
+  return !getNyseHolidays(year).has(dateStr);
+}
+
+// Formats any Date as YYYY-MM-DD in US Eastern time - NOT the browser's
+// local timezone (Singapore, or wherever this is opened from) and NOT
+// raw UTC. This app runs on the US market's own calendar, so "today"
+// needs to mean the exchange's today regardless of where the browser is.
+// Plain `new Date().toISOString()` (UTC) disagrees with the true ET
+// trading date for roughly 8pm-midnight ET every day, since UTC's
+// calendar rolls over 4-5 hours before ET's does - risking a session
+// getting stored under the wrong date, silently mismatched against what
+// the backend (which is already fixed to use ET) stores for the same
+// real trading day.
+function easternDateStr(date) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(date || new Date());
+  const get = (type) => parts.find((p) => p.type === type).value;
+  return `${get('year')}-${get('month')}-${get('day')}`;
+}
+function todayEasternDateStr() {
+  return easternDateStr(new Date());
+}
+
 const PARSE_ENDPOINT = '/api/parse-gex'; // adjust if hosted elsewhere
 const ANALYZE_ENDPOINT = '/api/analyze-gex';
 const WEEKLY_ENDPOINT = '/api/analyze-gex-period';
@@ -1045,17 +1149,10 @@ async function fetchSnapshotHistoryFromD1(ticker, days) {
     if (!res.ok) return [];
     const { snapshots } = await res.json();
     if (!Array.isArray(snapshots)) return [];
-    // Trading days only - excludes Sat/Sun. Does NOT exclude US market
-    // holidays (Thanksgiving, July 4th, etc.) since that needs a
-    // maintained holiday calendar this doesn't have; a holiday snapshot
-    // would only appear here if a pull was actually attempted that day; in
-    // practice Tiger pulls on non-trading days come back with flat/zero
-    // gamma anyway (documented limitation), so this mainly guards against
-    // an accidental weekend pull skewing the weekly/monthly window.
-    return snapshots.filter((s) => {
-      const day = new Date(s.captured_at).getUTCDay();
-      return day !== 0 && day !== 6; // 0 = Sunday, 6 = Saturday
-    });
+    // Trading days only - excludes Sat/Sun AND NYSE holidays (rule-based
+    // calculation, see isTradingDay above). Closes a previously-known gap
+    // where only weekends were excluded, not holidays.
+    return snapshots.filter((s) => isTradingDay(s.captured_at.slice(0, 10)));
   } catch (err) {
     console.warn('Snapshot history fetch error:', err);
     return [];
@@ -1153,7 +1250,7 @@ async function generateMonthlyRead() {
 }
 
 function renderMonthlyChart(data) {
-  const labels = data.flip_zone_trend.map((d) => new Date(d.captured_at).toLocaleDateString());
+  const labels = data.flip_zone_trend.map((d) => new Date(d.captured_at).toLocaleDateString('en-US', { timeZone: 'America/New_York' }));
   const spotData = data.flip_zone_trend.map((d) => d.spot_price);
   const flipData = data.flip_zone_trend.map((d) => d.flip_zone);
 
@@ -1211,7 +1308,7 @@ async function downloadMonthlyPdf() {
     doc.setTextColor(100);
     const [from, to] = currentMonthly.date_range;
     doc.text(
-      `${currentMonthly.snapshot_count} sessions · ${new Date(from).toLocaleDateString()} to ${new Date(to).toLocaleDateString()}`,
+      `${currentMonthly.snapshot_count} sessions · ${new Date(from).toLocaleDateString('en-US', { timeZone: 'America/New_York' })} to ${new Date(to).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`,
       margin, y
     );
     y += 24;
@@ -1361,7 +1458,7 @@ async function downloadWeeklyPdf() {
     doc.setTextColor(100);
     const [from, to] = currentWeekly.date_range;
     doc.text(
-      `${currentWeekly.snapshot_count} snapshots · ${new Date(from).toLocaleDateString()} to ${new Date(to).toLocaleDateString()}`,
+      `${currentWeekly.snapshot_count} snapshots · ${new Date(from).toLocaleDateString('en-US', { timeZone: 'America/New_York' })} to ${new Date(to).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`,
       margin, y
     );
     y += 24;
@@ -1923,7 +2020,7 @@ async function generateMonthlyFlowRead() {
 }
 
 function renderFlowMonthlyChart(data) {
-  const labels = data.put_call_trend.map((d) => new Date(d.captured_at).toLocaleDateString());
+  const labels = data.put_call_trend.map((d) => new Date(d.captured_at).toLocaleDateString('en-US', { timeZone: 'America/New_York' }));
   const values = data.put_call_trend.map((d) => d.put_call_ratio_pct);
 
   flowMonthlyChartWrap.style.height = '280px';
@@ -1986,7 +2083,7 @@ async function downloadMonthlyFlowPdf() {
     doc.setTextColor(100);
     const [from, to] = currentFlowMonthly.date_range;
     doc.text(
-      `${currentFlowMonthly.snapshot_count} days · ${new Date(from).toLocaleDateString()} to ${new Date(to).toLocaleDateString()}`,
+      `${currentFlowMonthly.snapshot_count} days · ${new Date(from).toLocaleDateString('en-US', { timeZone: 'America/New_York' })} to ${new Date(to).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`,
       margin, y
     );
     y += 24;
@@ -2063,7 +2160,7 @@ async function generateWeeklyFlowRead() {
 }
 
 function renderFlowWeeklyChart(data) {
-  const labels = data.put_call_trend.map((d) => new Date(d.captured_at).toLocaleDateString());
+  const labels = data.put_call_trend.map((d) => new Date(d.captured_at).toLocaleDateString('en-US', { timeZone: 'America/New_York' }));
   const values = data.put_call_trend.map((d) => d.put_call_ratio_pct);
 
   flowWeeklyChartWrap.style.height = '260px';
@@ -2126,7 +2223,7 @@ async function downloadWeeklyFlowPdf() {
     doc.setTextColor(100);
     const [from, to] = currentFlowWeekly.date_range;
     doc.text(
-      `${currentFlowWeekly.snapshot_count} days · ${new Date(from).toLocaleDateString()} to ${new Date(to).toLocaleDateString()}`,
+      `${currentFlowWeekly.snapshot_count} days · ${new Date(from).toLocaleDateString('en-US', { timeZone: 'America/New_York' })} to ${new Date(to).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`,
       margin, y
     );
     y += 24;
@@ -2341,7 +2438,7 @@ async function getMacroEventsForSession(sessionDate, expiration) {
 }
 
 async function refreshMacroCalendar() {
-  const monthKey = new Date().toISOString().slice(0, 7);
+  const monthKey = todayEasternDateStr().slice(0, 7);
   ctRefreshMacroBtn.disabled = true;
   setCtStatus('Refreshing macro calendar for ' + monthKey + '...');
   try {
@@ -2370,7 +2467,7 @@ async function runCoffeeAndTea() {
     setCtStatus('Checking for a prior session to compare against...');
     const priorSnapshot = await buildPriorSnapshot(currentData.ticker);
     const flowData = buildFlowDataFromCurrent(currentFlowStats);
-    const sessionDate = new Date().toISOString().slice(0, 10);
+    const sessionDate = todayEasternDateStr();
 
     setCtStatus('Getting macro calendar for this window...');
     const macroEvents = await getMacroEventsForSession(sessionDate, currentData.expiration);

@@ -26,6 +26,31 @@
 //   calibration (the number that actually says whether the GEX thesis's
 //   confidence levels are trustworthy).
 
+// Formats any Date/timestamp as YYYY-MM-DD in US Eastern time. Used both
+// for "today" (called with no argument) and for labeling historical
+// price bars by their correct ET trading date, rather than whatever date
+// UTC happens to assign them.
+function easternDateStr(date) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(date || new Date());
+  const get = (type) => parts.find((p) => p.type === type).value;
+  return `${get('year')}-${get('month')}-${get('day')}`;
+}
+
+// Returns today's date (YYYY-MM-DD) in US Eastern time - NOT server-local
+// time and NOT raw UTC. This app runs on the US market's own calendar, so
+// "today" needs to mean the exchange's today regardless of where the
+// request originates. Using plain `new Date().toISOString()` (UTC) here
+// would disagree with the actual ET trading date for roughly 8pm-midnight
+// ET every day, since UTC's calendar rolls over 4-5 hours before ET's
+// does - risking grading a strategy as resolved before its expiration has
+// actually happened, or comparing against the wrong day's snapshot.
+function todayEasternDateStr() {
+  return easternDateStr(new Date());
+}
+
 function getCloudflareCreds() {
   return {
     accountId: (process.env.CLOUDFLARE_ACCOUNT_ID || '').trim(),
@@ -68,7 +93,7 @@ async function handleHistory(req, res, ticker) {
 
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - lookbackDays);
-  const cutoffDate = cutoff.toISOString().slice(0, 10);
+  const cutoffDate = easternDateStr(cutoff);
 
   const rows = await runD1Query(
     'SELECT session_date, gex_data_json FROM gex_snapshots WHERE ticker = ? AND session_date >= ? ORDER BY session_date ASC',
@@ -149,7 +174,7 @@ async function fetchDailyCloses(ticker, fromDateStr, toDateStr) {
   const closes = result.indicators?.quote?.[0]?.close || [];
   return timestamps
     .map((ts, i) => ({
-      date: new Date(ts * 1000).toISOString().slice(0, 10),
+      date: easternDateStr(new Date(ts * 1000)),
       close: closes[i],
     }))
     .filter((d) => typeof d.close === 'number' && d.date >= fromDateStr && d.date <= toDateStr);
@@ -206,7 +231,7 @@ function gradeStrategy(strategy, sessionDate, expiration, dailyCloses, ivUsedPct
 }
 
 async function handleGrade(req, res, ticker) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayEasternDateStr();
 
   const sessions = await runD1Query(
     'SELECT session_date, expiration, output_json FROM ct_sessions WHERE ticker = ? AND expiration < ? ORDER BY session_date ASC',
@@ -273,7 +298,7 @@ async function handleGrade(req, res, ticker) {
 async function handleWeeklySummary(req, res, ticker) {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - 7);
-  const cutoffDate = cutoff.toISOString().slice(0, 10);
+  const cutoffDate = easternDateStr(cutoff);
 
   const grades = await runD1Query(
     'SELECT strategy_name, outcome, resolution_reason, predicted_pop FROM ct_grades WHERE ticker = ? AND resolution_date >= ? ORDER BY resolution_date ASC',
