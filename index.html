@@ -84,28 +84,36 @@
 </head>
 <body>
 
-<h1>GEX Visualizer</h1>
+<h1 id="gexVisualizerTitle" style="cursor:pointer; user-select:none; display:flex; align-items:center; gap:8px;">
+  GEX Visualizer
+  <span id="uploadToggleChevron" style="font-size:13px; font-weight:normal; color:#777;">▾ manual upload</span>
+</h1>
 <p style="font-size: 13px; color: #999;">
-  Upload a Bullflow GEX screenshot you took manually. Nothing here ever
-  talks to Bullflow directly.
+  Pulls live GEX for a ticker directly from Tiger Brokers. Click the title above for the manual Bullflow-screenshot upload option, which never talks to Bullflow directly either.
 </p>
 
-<div class="controls">
-  <div id="dropZone">
-    <input type="file" id="fileInput" accept="image/*" />
-    <span id="dropZoneLabel">or drag and drop a screenshot here</span>
-  </div>
+<div class="controls" style="margin-top:0;">
+  <input type="text" id="tigerTickerInput" value="SPY" style="background:#1a1a1a; color:#eee; border:1px solid #333; border-radius:6px; padding:8px 12px; width:80px;" />
   <select id="readType">
     <option value="daily">Daily read</option>
     <option value="weekly">Weekly read</option>
   </select>
-  <button id="parseBtn" disabled>Parse and visualize</button>
+  <button id="tigerPullBtn">Pull from Tiger</button>
   <button id="pdfBtn" disabled>Download PDF</button>
 </div>
 
-<div class="controls" style="margin-top:0;">
-  <input type="text" id="tigerTickerInput" value="SPY" style="background:#1a1a1a; color:#eee; border:1px solid #333; border-radius:6px; padding:8px 12px; width:80px;" />
-  <button id="tigerPullBtn">Pull from Tiger (experimental)</button>
+<div id="manualUploadPanel" style="display:none; margin-top:14px; padding:14px; background:#141414; border:1px solid #262626; border-radius:8px;">
+  <p style="font-size:12.5px; color:#888; margin-top:0; margin-bottom:10px;">
+    Upload a Bullflow GEX screenshot you took manually. Nothing here ever
+    talks to Bullflow directly.
+  </p>
+  <div class="controls" style="margin-top:0;">
+    <div id="dropZone">
+      <input type="file" id="fileInput" accept="image/*" />
+      <span id="dropZoneLabel">or drag and drop a screenshot here</span>
+    </div>
+    <button id="parseBtn" disabled>Parse and visualize</button>
+  </div>
 </div>
 
 <div class="status" id="status"></div>
@@ -732,6 +740,16 @@ async function pullFromTiger() {
 }
 
 document.getElementById('tigerPullBtn').addEventListener('click', pullFromTiger);
+
+// Manual screenshot upload is tucked behind the title - click to reveal.
+const gexVisualizerTitle = document.getElementById('gexVisualizerTitle');
+const manualUploadPanel = document.getElementById('manualUploadPanel');
+const uploadToggleChevron = document.getElementById('uploadToggleChevron');
+gexVisualizerTitle.addEventListener('click', () => {
+  const isOpen = manualUploadPanel.style.display !== 'none';
+  manualUploadPanel.style.display = isOpen ? 'none' : 'block';
+  uploadToggleChevron.textContent = isOpen ? '▾ manual upload' : '▴ manual upload';
+});
 
 async function processGexData(data) {
   currentData = data;
