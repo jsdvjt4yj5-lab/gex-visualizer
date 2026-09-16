@@ -64,6 +64,22 @@
     cursor: pointer;
   }
   .history-item:hover { color: #fff; }
+  .analysis-logs { margin-top: 24px; }
+  .analysis-logs h2 { font-size: 15px; color: #aaa; }
+  .log-tab {
+    background: #1a1a1a;
+    color: #999;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .log-tab.active {
+    background: #2a2a2a;
+    color: #eee;
+    border-color: #555;
+  }
 </style>
 </head>
 <body>
@@ -142,31 +158,6 @@
 
 <div id="flowAnalysisBox" style="display:none; margin-top:16px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
 
-<div class="controls" style="margin-top:12px;">
-  <select id="flowTickerFilter"><option value="">All tickers</option></select>
-  <button id="flowWeeklyBtn" disabled>Generate weekly flow read</button>
-  <button id="flowMonthlyBtn" disabled>Generate monthly flow read</button>
-</div>
-<div id="flowHistoryList"></div>
-
-<div id="flowWeeklyBox" style="display:none; margin-top:16px;">
-  <h2 style="font-size:15px; color:#aaa;">Weekly flow read</h2>
-  <div id="flowWeeklyAnalysisText" style="padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
-  <div id="flowWeeklyChartWrap" style="position:relative; height:0; margin-top:16px;">
-    <canvas id="flowWeeklyChart"></canvas>
-  </div>
-  <button id="flowWeeklyPdfBtn" style="margin-top:12px;">Download weekly flow PDF</button>
-</div>
-
-<div id="flowMonthlyBox" style="display:none; margin-top:16px;">
-  <h2 style="font-size:15px; color:#aaa;">Monthly flow read</h2>
-  <div id="flowMonthlyAnalysisText" style="padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
-  <div id="flowMonthlyChartWrap" style="position:relative; height:0; margin-top:16px;">
-    <canvas id="flowMonthlyChart"></canvas>
-  </div>
-  <button id="flowMonthlyPdfBtn" style="margin-top:12px;">Download monthly flow PDF</button>
-</div>
-
 <hr style="border:none; border-top:1px solid #222; margin:32px 0 20px;" />
 
 <h2 style="font-size:15px; color:#aaa;">Protocol Coffee and Tea</h2>
@@ -212,14 +203,30 @@
 
 <hr style="border:none; border-top:1px solid #222; margin:32px 0 20px;" />
 
-<div class="history">
-  <h2>History</h2>
+<div class="analysis-logs">
+  <h2>Analysis Logs</h2>
   <div class="controls" style="margin-top:0;">
-    <select id="tickerFilter"><option value="">All tickers</option></select>
-    <button id="weeklyBtn" disabled>Generate weekly read</button>
-    <button id="monthlyBtn" disabled>Generate monthly read</button>
+    <button id="gexLogTab" class="log-tab active">GEX Analysis Log</button>
+    <button id="flowLogTab" class="log-tab">EOD Flow Log</button>
   </div>
-  <div id="historyList"></div>
+
+  <div id="gexLogPanel">
+    <div class="controls" style="margin-top:12px;">
+      <select id="tickerFilter"><option value="">All tickers</option></select>
+      <button id="weeklyBtn" disabled>Generate weekly read</button>
+      <button id="monthlyBtn" disabled>Generate monthly read</button>
+    </div>
+    <div id="historyList"></div>
+  </div>
+
+  <div id="flowLogPanel" style="display:none;">
+    <div class="controls" style="margin-top:12px;">
+      <select id="flowTickerFilter"><option value="">All tickers</option></select>
+      <button id="flowWeeklyBtn" disabled>Generate weekly flow read</button>
+      <button id="flowMonthlyBtn" disabled>Generate monthly flow read</button>
+    </div>
+    <div id="flowHistoryList"></div>
+  </div>
 </div>
 
 <div id="weeklyBox" style="display:none; margin-top:16px;">
@@ -229,6 +236,24 @@
     <canvas id="weeklyChart"></canvas>
   </div>
   <button id="weeklyPdfBtn" style="margin-top:12px;">Download weekly PDF</button>
+</div>
+
+<div id="flowWeeklyBox" style="display:none; margin-top:16px;">
+  <h2 style="font-size:15px; color:#aaa;">Weekly flow read</h2>
+  <div id="flowWeeklyAnalysisText" style="padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+  <div id="flowWeeklyChartWrap" style="position:relative; height:0; margin-top:16px;">
+    <canvas id="flowWeeklyChart"></canvas>
+  </div>
+  <button id="flowWeeklyPdfBtn" style="margin-top:12px;">Download weekly flow PDF</button>
+</div>
+
+<div id="flowMonthlyBox" style="display:none; margin-top:16px;">
+  <h2 style="font-size:15px; color:#aaa;">Monthly flow read</h2>
+  <div id="flowMonthlyAnalysisText" style="padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+  <div id="flowMonthlyChartWrap" style="position:relative; height:0; margin-top:16px;">
+    <canvas id="flowMonthlyChart"></canvas>
+  </div>
+  <button id="flowMonthlyPdfBtn" style="margin-top:12px;">Download monthly flow PDF</button>
 </div>
 
 <div id="monthlyBox" style="display:none; margin-top:16px;">
@@ -1768,9 +1793,16 @@ function renderFlowHistory() {
   filtered.forEach((item) => {
     const div = document.createElement('div');
     div.className = 'history-item';
+    div.style.display = 'flex';
+    div.style.alignItems = 'center';
+    div.style.justifyContent = 'space-between';
     const when = new Date(item.captured_at).toLocaleString();
-    div.innerHTML = `<span>${item.ticker} · ${item.trade_count} trades · ${item.put_call_ratio_pct}% puts</span><span>${when}</span>`;
-    div.addEventListener('click', () => {
+
+    const infoSpan = document.createElement('span');
+    infoSpan.style.cursor = 'pointer';
+    infoSpan.style.flex = '1';
+    infoSpan.innerHTML = `<span>${item.ticker} · ${item.trade_count} trades · ${item.put_call_ratio_pct}% puts</span> <span style="color:#888; font-size:12px;">${when}</span>`;
+    infoSpan.addEventListener('click', () => {
       currentFlowStats = item;
       currentFlowAnalysis = item.analysis || null;
       showFlowSummary(item);
@@ -1783,10 +1815,45 @@ function renderFlowHistory() {
       }
       flowPdfBtn.disabled = false;
     });
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.textContent = '✕';
+    deleteBtn.title = 'Delete this flow upload (wrong file or bad analysis)';
+    deleteBtn.style.cssText = 'background:none; border:none; color:#a33; cursor:pointer; font-size:14px; padding:4px 8px; margin-left:8px;';
+    deleteBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteFlowHistoryItem(item);
+    });
+
+    div.appendChild(infoSpan);
+    div.appendChild(deleteBtn);
     flowHistoryList.appendChild(div);
   });
 
   updateFlowWeeklyButtonState();
+}
+
+// Flow data has no D1 backing (localStorage only) - a simpler deletion
+// than the GEX version, but with the same confirm-first pattern.
+function deleteFlowHistoryItem(item) {
+  const confirmed = confirm(
+    `Delete this ${item.ticker} flow upload from ${new Date(item.captured_at).toLocaleString()}?\n\n` +
+    `This cannot be undone.`
+  );
+  if (!confirmed) return;
+
+  const existing = JSON.parse(localStorage.getItem('flow_history') || '[]');
+  const updated = existing.filter((i) => i.captured_at !== item.captured_at);
+  localStorage.setItem('flow_history', JSON.stringify(updated));
+
+  if (currentFlowStats && currentFlowStats.captured_at === item.captured_at) {
+    currentFlowStats = null;
+    currentFlowAnalysis = null;
+    flowAnalysisBox.style.display = 'none';
+    flowPdfBtn.disabled = true;
+  }
+
+  renderFlowHistory();
 }
 
 function updateFlowWeeklyButtonState() {
@@ -2594,6 +2661,27 @@ async function showWeeklySummary() {
 
 gradeBtn.addEventListener('click', runGrading);
 summaryBtn.addEventListener('click', showWeeklySummary);
+
+// ---- Analysis Logs tab switching ----
+const gexLogTab = document.getElementById('gexLogTab');
+const flowLogTab = document.getElementById('flowLogTab');
+const gexLogPanel = document.getElementById('gexLogPanel');
+const flowLogPanel = document.getElementById('flowLogPanel');
+
+function showGexLog() {
+  gexLogPanel.style.display = 'block';
+  flowLogPanel.style.display = 'none';
+  gexLogTab.classList.add('active');
+  flowLogTab.classList.remove('active');
+}
+function showFlowLog() {
+  gexLogPanel.style.display = 'none';
+  flowLogPanel.style.display = 'block';
+  flowLogTab.classList.add('active');
+  gexLogTab.classList.remove('active');
+}
+gexLogTab.addEventListener('click', showGexLog);
+flowLogTab.addEventListener('click', showFlowLog);
 
 renderHistory();
 renderFlowHistory();
