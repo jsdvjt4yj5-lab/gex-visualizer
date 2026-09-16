@@ -298,6 +298,159 @@ def get_underlying_iv(quote_client, symbol):
     return HARD_FALLBACK_IV, "hard_fallback"
 
 
+# ---- Price-data mode: MA / volume-profile from Tiger's own bars, as a
+# real (documented, authenticated) alternative to the unofficial Yahoo
+# Finance endpoint get-price-data.js currently uses. Response shapes below
+# deliberately match get-price-data.js's fields exactly, so the frontend
+# can call either interchangeably (Tiger first, Yahoo as a free fallback).
+
+def fetch_tiger_bars(quote_client, symbol, period, limit):
+    """Returns a list of {time_ms, close, volume} dicts, oldest first.
+    Tiger's exact returned column names aren't 100% confirmed from
+    documentation alone (docs show Rust/CLI examples, not a literal
+    Python DataFrame column list) - this tries the common variants and
+    raises a clear, diagnosable error naming the ACTUAL columns Tiger
+    returned if none match, rather than failing silently or guessing wrong
+    in a way that's hard to debug from outside.
+    """
+    df = quote_client.get_bars([symbol], period=period, limit=limit)
+    if df is None or len(df) == 0:
+        raise RuntimeError(f"Tiger returned no bars for {symbol} (period={period}, limit={limit})")
+
+    cols = {str(c).lower(): c for c in df.columns}
+    time_col = cols.get("time") or cols.get("timestamp")
+    close_col = cols.get("close")
+    volume_col = cols.get("volume")
+    if not time_col or not close_col:
+        raise RuntimeError(
+            f"Unexpected columns in Tiger bars response: {list(df.columns)} "
+            f"- expected at least 'time'/'timestamp' and 'close'"
+        )
+
+    bars = []
+    for _, row in df.iterrows():
+        t_raw = row[time_col]
+        if t_raw is None or (isinstance(t_raw, float) and math.isnan(t_raw)):
+            continue
+        close_raw = row[close_col]
+        if close_raw is None or (isinstance(close_raw, float) and math.isnan(close_raw)):
+            continue
+        volume_raw = row[volume_col] if volume_col is not None else None
+        bars.append({
+            "time_ms": int(t_raw),
+            "close": float(close_raw),
+            "volume": float(volume_raw) if volume_raw is not None and not (isinstance(volume_raw, float) and math.isnan(volume_raw)) else None,
+        })
+    bars.sort(key=lambda b: b["time_ms"])
+    return bars
+
+
+def sma(closes, period):
+    if len(closes) < period:
+        return None
+    return round(sum(closes[-period:]) / period, 2)
+
+
+def realized_vol_pct(closes, period):
+    """Annualized realized volatility from daily log returns - same
+    close-to-close calculation get-price-data.js already uses, ported
+    directly so results are consistent regardless of which source
+    (Tiger or Yahoo) actually served the underlying price data.
+    """
+    if len(closes) < period + 1:
+        return None
+    window = closes[-(period + 1):]
+    log_returns = [math.log(window[i] / window[i - 1]) for i in range(1, len(window))]
+    mean = sum(log_returns) / len(log_returns)
+    variance = sum((v - mean) ** 2 for v in log_returns) / (len(log_returns) - 1)
+    daily_std = math.sqrt(variance)
+    return round(daily_std * math.sqrt(252) * 100, 2)
+
+
+def handle_price_data_ma(quote_client, symbol):
+    # limit=210: 200 needed + a small buffer, same reasoning as the
+    # holiday-aware exact walk-back already used for the Yahoo version -
+    # Tiger's own daily bars are real trading days by construction, so no
+    # calendar-day padding guess is needed here at all.
+    bars = fetch_tiger_bars(quote_client, symbol, period="day", limit=210)
+    closes = [b["close"] for b in bars]
+    if len(closes) < 30:
+        return {"error": "Not enough price history to compute moving averages"}, 422
+
+    return {
+        "symbol": symbol,
+        "price": round(closes[-1], 2),
+        "ma30": sma(closes, 30),
+        "ma200": sma(closes, 200),
+        "ma200_available": len(closes) >= 200,
+        "realized_vol_10d_pct": realized_vol_pct(closes, 10),
+        "realized_vol_20d_pct": realized_vol_pct(closes, 20),
+        "source": "tiger",
+    }, 200
+
+
+def handle_price_data_volume_profile(quote_client, symbol, days):
+    # 30-min bars, ~13 per regular trading day - limit=300 comfortably
+    # covers the max 10-day lookback with real margin, then filtered to
+    # the actual requested window by timestamp below.
+    bars = fetch_tiger_bars(quote_client, symbol, period="30min", limit=300)
+    cutoff_ms = int((datetime.now(timezone.utc).timestamp() - days * 24 * 3600) * 1000)
+    bars = [b for b in bars if b["time_ms"] >= cutoff_ms and b["volume"]]
+    if len(bars) < 10:
+        return {"error": "Not enough intraday data to build a volume profile"}, 422
+
+    prices = [b["close"] for b in bars]
+    min_price, max_price = min(prices), max(prices)
+    price_range = (max_price - min_price) or 1
+    bucket_count = 30
+    bucket_size = price_range / bucket_count
+
+    buckets = [{
+        "price_low": round(min_price + i * bucket_size, 2),
+        "price_high": round(min_price + (i + 1) * bucket_size, 2),
+        "volume": 0.0,
+    } for i in range(bucket_count)]
+
+    for b in bars:
+        idx = min(max(int((b["close"] - min_price) / bucket_size), 0), bucket_count - 1)
+        buckets[idx]["volume"] += b["volume"]
+
+    total_volume = sum(bk["volume"] for bk in buckets)
+    poc_idx = max(range(bucket_count), key=lambda i: buckets[i]["volume"])
+    poc = round((buckets[poc_idx]["price_low"] + buckets[poc_idx]["price_high"]) / 2, 2)
+
+    # Value area: expand outward from POC, adding whichever neighboring
+    # bucket has more volume, until ~70% of total volume is included -
+    # same standard construction get-volume-profile.js already uses.
+    included = {poc_idx}
+    included_volume = buckets[poc_idx]["volume"]
+    low_ptr, high_ptr = poc_idx - 1, poc_idx + 1
+    while included_volume < total_volume * 0.7 and (low_ptr >= 0 or high_ptr < bucket_count):
+        low_vol = buckets[low_ptr]["volume"] if low_ptr >= 0 else -1
+        high_vol = buckets[high_ptr]["volume"] if high_ptr < bucket_count else -1
+        if high_vol >= low_vol and high_ptr < bucket_count:
+            included.add(high_ptr)
+            included_volume += buckets[high_ptr]["volume"]
+            high_ptr += 1
+        elif low_ptr >= 0:
+            included.add(low_ptr)
+            included_volume += buckets[low_ptr]["volume"]
+            low_ptr -= 1
+        else:
+            break
+
+    included_sorted = sorted(included)
+    return {
+        "symbol": symbol,
+        "lookback_days": days,
+        "poc": poc,
+        "value_area_low": round(buckets[included_sorted[0]]["price_low"], 2),
+        "value_area_high": round(buckets[included_sorted[-1]]["price_high"], 2),
+        "buckets": buckets,
+        "source": "tiger",
+    }, 200
+
+
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
@@ -342,6 +495,30 @@ class handler(BaseHTTPRequestHandler):
                                 "Service > API Permissions for a "
                                 "historical-quote tier.",
                     }).encode())
+                return
+
+            # Price-data mode: MA or volume-profile from Tiger's own bars,
+            # as an alternative to Yahoo Finance for the same features.
+            # Usage: /api/get-tiger-gex?mode=price_data&symbol=SPY&type=ma
+            #        /api/get-tiger-gex?mode=price_data&symbol=SPY&type=volume-profile&days=5
+            if query.get("mode", [None])[0] == "price_data":
+                price_symbol = query.get("symbol", ["SPY"])[0].upper()
+                data_type = query.get("type", ["ma"])[0]
+                try:
+                    price_quote_client = get_quote_client()
+                    if data_type == "ma":
+                        body, status = handle_price_data_ma(price_quote_client, price_symbol)
+                    elif data_type == "volume-profile":
+                        days = min(max(int(query.get("days", ["5"])[0]), 1), 10)
+                        body, status = handle_price_data_volume_profile(price_quote_client, price_symbol, days)
+                    else:
+                        body, status = {"error": 'type must be "ma" or "volume-profile"'}, 400
+                except Exception as e:
+                    body, status = {"error": "Tiger price-data fetch failed", "detail": str(e)}, 502
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(body, default=str).encode())
                 return
 
             symbol = query.get("symbol", ["SPY"])[0].upper()
@@ -461,10 +638,16 @@ class handler(BaseHTTPRequestHandler):
                     # for every row in practice (confirmed in testing) - use
                     # the underlying's aggregate IV as a flat fallback
                     # whenever a contract's own IV isn't usable, rather than
-                    # dropping the contract entirely.
+                    # dropping the contract entirely. Tracked per-row (not
+                    # incremented directly here) so the eventual count only
+                    # includes rows that actually end up in used_rows below -
+                    # otherwise the two counters track different populations
+                    # (this one would include dust/duplicate rows the other
+                    # excludes) and a rate computed from them can exceed 100%.
+                    used_fallback_this_row = False
                     if iv <= 0:
                         iv = underlying_iv
-                        used_fallback_iv_rows += 1
+                        used_fallback_this_row = True
 
                     contract_key = (strike, row["put_call"])
                     if contract_key in seen_contracts:
@@ -482,6 +665,8 @@ class handler(BaseHTTPRequestHandler):
                     if abs(contract_gex) >= 1:  # ignore dust-level contributions when checking "had data"
                         day_had_data = True
                         used_rows += 1
+                        if used_fallback_this_row:
+                            used_fallback_iv_rows += 1
                     # SIGN CONVENTION (explicit, written contract - audited Sept 2026):
                     # this is "Model A" per Chilingarian (2026, SSRN 7131778) - the
                     # SqueezeMetrics open-interest proxy. Calls contribute +gamma,

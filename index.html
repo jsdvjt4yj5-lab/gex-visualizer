@@ -377,6 +377,43 @@ const ANALYZE_ENDPOINT = '/api/analyze-gex';
 const WEEKLY_ENDPOINT = '/api/analyze-gex-period';
 const MA_ENDPOINT = '/api/get-price-data?type=ma';
 const VOLUME_PROFILE_ENDPOINT = '/api/get-price-data?type=volume-profile';
+
+// Tries Tiger's own bars endpoint first (real, documented, authenticated
+// API), falling back to the Yahoo Finance endpoint automatically if
+// Tiger's call fails for any reason - free, automatic insurance against
+// Tiger quota exhaustion, an outage, or a permission-tier change, since
+// Yahoo costs nothing and this only runs when Tiger's own call didn't
+// succeed. Both sources return the same field shape, so the caller
+// doesn't need to know which one actually served the response.
+async function fetchMaWithFallback(ticker) {
+  try {
+    const tigerRes = await fetch(`/api/get-tiger-gex?mode=price_data&type=ma&symbol=${encodeURIComponent(ticker)}`);
+    if (tigerRes.ok) {
+      const data = await tigerRes.json();
+      if (!data.error) return data;
+    }
+  } catch (e) {
+    // fall through to Yahoo below
+  }
+  const yahooRes = await fetch(`${MA_ENDPOINT}&symbol=${encodeURIComponent(ticker)}`);
+  if (!yahooRes.ok) throw new Error(`MA fetch failed (${yahooRes.status})`);
+  return await yahooRes.json();
+}
+
+async function fetchVolumeProfileWithFallback(ticker) {
+  try {
+    const tigerRes = await fetch(`/api/get-tiger-gex?mode=price_data&type=volume-profile&symbol=${encodeURIComponent(ticker)}`);
+    if (tigerRes.ok) {
+      const data = await tigerRes.json();
+      if (!data.error) return data;
+    }
+  } catch (e) {
+    // fall through to Yahoo below
+  }
+  const yahooRes = await fetch(`${VOLUME_PROFILE_ENDPOINT}&symbol=${encodeURIComponent(ticker)}`);
+  if (!yahooRes.ok) throw new Error(`Volume profile fetch failed (${yahooRes.status})`);
+  return await yahooRes.json();
+}
 const fileInput = document.getElementById('fileInput');
 const dropZone = document.getElementById('dropZone');
 const dropZoneLabel = document.getElementById('dropZoneLabel');
@@ -719,37 +756,26 @@ async function processGexData(data) {
 
   let movingAverages = null;
   try {
-    const maRes = await fetch(`${MA_ENDPOINT}&symbol=${encodeURIComponent(data.ticker)}`);
-    if (maRes.ok) {
-      movingAverages = await maRes.json();
-      data.movingAverages = movingAverages;
-      showMaInfo(movingAverages);
-    } else {
-      maInfoBox.style.display = 'none';
-    }
+    movingAverages = await fetchMaWithFallback(data.ticker);
+    data.movingAverages = movingAverages;
+    showMaInfo(movingAverages);
   } catch (e) {
     maInfoBox.style.display = 'none';
   }
 
   let volumeProfileSummary = null;
   try {
-    const vpRes = await fetch(`${VOLUME_PROFILE_ENDPOINT}&symbol=${encodeURIComponent(data.ticker)}`);
-    if (vpRes.ok) {
-      const vp = await vpRes.json();
-      volumeProfileSummary = {
-        symbol: vp.symbol,
-        lookback_days: vp.lookback_days,
-        poc: vp.poc,
-        value_area_low: vp.value_area_low,
-        value_area_high: vp.value_area_high,
-      };
-      data.volumeProfile = vp;
-      showVolumeProfileInfo(vp);
-      renderVolumeProfileChart(vp, data);
-    } else {
-      vpInfoBox.style.display = 'none';
-      vpChartWrap.style.height = '0';
-    }
+    const vp = await fetchVolumeProfileWithFallback(data.ticker);
+    volumeProfileSummary = {
+      symbol: vp.symbol,
+      lookback_days: vp.lookback_days,
+      poc: vp.poc,
+      value_area_low: vp.value_area_low,
+      value_area_high: vp.value_area_high,
+    };
+    data.volumeProfile = vp;
+    showVolumeProfileInfo(vp);
+    renderVolumeProfileChart(vp, data);
   } catch (e) {
     vpInfoBox.style.display = 'none';
     vpChartWrap.style.height = '0';
