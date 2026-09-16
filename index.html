@@ -9,9 +9,69 @@
     font-family: -apple-system, Helvetica, Arial, sans-serif;
     background: #0d0d0d;
     color: #eee;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    min-height: 100vh;
+  }
+  .main-content {
+    flex: 1;
+    min-width: 0;
     max-width: 700px;
     margin: 0 auto;
     padding: 20px;
+  }
+  #sidebar {
+    width: 190px;
+    flex-shrink: 0;
+    background: #111;
+    border-right: 1px solid #222;
+    padding: 20px 12px;
+    position: sticky;
+    top: 0;
+    align-self: flex-start;
+    height: 100vh;
+    overflow-y: auto;
+    box-sizing: border-box;
+  }
+  #sidebar h3 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #666;
+    margin: 0 0 10px;
+    font-weight: 600;
+  }
+  .sidebar-item {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    color: #aaa;
+    font-size: 13px;
+    padding: 7px 8px;
+    border-radius: 5px;
+    cursor: pointer;
+    margin-bottom: 2px;
+    font-family: inherit;
+  }
+  .sidebar-item:hover { background: #1c1c1c; color: #eee; }
+  .sidebar-item .dot {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    margin-right: 8px; background: #3a3; flex-shrink: 0;
+  }
+  .sidebar-item.section-hidden { color: #666; }
+  .sidebar-item.section-hidden .dot { background: #444; }
+  @media (max-width: 640px) {
+    body { flex-direction: column; }
+    #sidebar {
+      width: 100%; height: auto; position: static; border-right: none;
+      border-bottom: 1px solid #222; padding: 12px;
+    }
+    #sidebar > div { display: flex; flex-wrap: wrap; gap: 4px; }
+    .sidebar-item { width: auto; }
   }
   h1 { font-size: 20px; font-weight: 600; }
   .controls {
@@ -84,6 +144,21 @@
 </head>
 <body>
 
+<div id="sidebar">
+  <h3>Sections</h3>
+  <div id="sidebarItems">
+    <button class="sidebar-item" data-target="section-gex"><span class="dot"></span>GEX Visualizer</button>
+    <button class="sidebar-item" data-target="section-flow"><span class="dot"></span>EOD Flow</button>
+    <button class="sidebar-item" data-target="section-coffeetea"><span class="dot"></span>Coffee and Tea</button>
+    <button class="sidebar-item" data-target="section-backtest"><span class="dot"></span>Backtest</button>
+    <button class="sidebar-item" data-target="section-logs"><span class="dot"></span>Analysis Logs</button>
+    <button class="sidebar-item" data-target="section-chartanalysis"><span class="dot"></span>Chart Analysis</button>
+  </div>
+</div>
+
+<div class="main-content">
+
+<div id="section-gex" class="toggle-section">
 <h1 id="gexVisualizerTitle" style="cursor:pointer; user-select:none; display:flex; align-items:center; gap:8px;">
   GEX Visualizer
   <span id="uploadToggleChevron" style="font-size:13px; font-weight:normal; color:#777;">▾ manual upload</span>
@@ -139,7 +214,9 @@
 </div>
 
 <hr style="border:none; border-top:1px solid #222; margin:32px 0 20px;" />
+</div>
 
+<div id="section-flow" class="toggle-section">
 <h2 style="font-size:15px; color:#aaa;">EOD Flow Analysis</h2>
 <p style="font-size:13px; color:#999; margin-top:4px;">
   Upload a Bullflow flow export CSV (Collections export) after market close
@@ -167,7 +244,9 @@
 <div id="flowAnalysisBox" style="display:none; margin-top:16px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
 
 <hr style="border:none; border-top:1px solid #222; margin:32px 0 20px;" />
+</div>
 
+<div id="section-coffeetea" class="toggle-section">
 <h2 style="font-size:15px; color:#aaa;">Protocol Coffee and Tea</h2>
 <p style="font-size:13px; color:#999; margin-top:4px;">
   Its own separate protocol, run manually - click the button below once
@@ -198,7 +277,9 @@
 <div id="ctOutput" style="margin-top:16px;"></div>
 
 <hr style="border:none; border-top:1px solid #222; margin:32px 0 20px;" />
+</div>
 
+<div id="section-backtest" class="toggle-section">
 <div class="backtest">
   <h2>Strategy Backtest</h2>
   <div class="controls" style="margin-top:0;">
@@ -210,7 +291,9 @@
 </div>
 
 <hr style="border:none; border-top:1px solid #222; margin:32px 0 20px;" />
+</div>
 
+<div id="section-logs" class="toggle-section">
 <div class="analysis-logs">
   <h2>Analysis Logs</h2>
   <div class="controls" style="margin-top:0;">
@@ -271,6 +354,25 @@
     <canvas id="monthlyChart"></canvas>
   </div>
   <button id="monthlyPdfBtn" style="margin-top:12px;">Download monthly PDF</button>
+</div>
+</div>
+
+<hr style="border:none; border-top:1px solid #222; margin:32px 0 20px;" />
+
+<div id="section-chartanalysis" class="toggle-section">
+<h2 style="font-size:15px; color:#aaa;">Chart Analysis</h2>
+<p style="font-size:13px; color:#999; margin-top:4px;">
+  AI-written technical read of the price chart itself (trend, support/resistance,
+  notable patterns) from Tiger's daily bars - separate from the GEX-based reads above.
+</p>
+<div class="controls" style="margin-top:0;">
+  <input type="text" id="chartAnalysisTickerInput" value="SPY" style="background:#1a1a1a; color:#eee; border:1px solid #333; border-radius:6px; padding:8px 12px; width:80px;" />
+  <button id="chartAnalysisBtn" type="button">Generate chart analysis</button>
+</div>
+<div class="status" id="chartAnalysisStatus"></div>
+<div id="chartAnalysisOutput" style="margin-top:12px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd; display:none;"></div>
+</div>
+
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
@@ -750,6 +852,93 @@ gexVisualizerTitle.addEventListener('click', () => {
   manualUploadPanel.style.display = isOpen ? 'none' : 'block';
   uploadToggleChevron.textContent = isOpen ? '▾ manual upload' : '▴ manual upload';
 });
+
+// Sidebar: click a section name to show ONLY that section (hides the
+// rest). No persistence by design - every page load starts with all
+// sections visible. Clicking the section that's currently the only one
+// visible switches back to showing everything.
+const sidebarTargets = Array.from(document.querySelectorAll('.sidebar-item')).map((b) => b.dataset.target);
+
+function isSoleVisible(target) {
+  return sidebarTargets.every((id) => {
+    const el = document.getElementById(id);
+    if (!el) return true;
+    return id === target ? el.style.display !== 'none' : el.style.display === 'none';
+  });
+}
+
+// Chart.js canvases can render blank after their container goes from
+// display:none back to visible, since the canvas can lose its real
+// pixel size while hidden. Each section's chart instances get an
+// explicit .resize() right after it's shown again to guard against that -
+// this only affects rendering, never the underlying data, which was
+// never touched by hiding/showing a section in the first place.
+const SECTION_CHART_INSTANCES = {
+  'section-gex': () => [chartInstance, vpChartInstance, analysisChartInstance],
+  'section-flow': () => [flowChartInstance],
+  'section-logs': () => [weeklyChartInstance, monthlyChartInstance, flowWeeklyChartInstance, flowMonthlyChartInstance],
+};
+
+function resizeChartsIn(sectionId) {
+  const getInstances = SECTION_CHART_INSTANCES[sectionId];
+  if (!getInstances) return;
+  // Wait a frame so the browser has actually applied display:'' (real
+  // layout size) before asking Chart.js to measure and redraw against it.
+  requestAnimationFrame(() => {
+    getInstances().forEach((chart) => {
+      if (chart && typeof chart.resize === 'function') chart.resize();
+    });
+  });
+}
+
+document.querySelectorAll('.sidebar-item').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const target = btn.dataset.target;
+    if (!document.getElementById(target)) return;
+
+    const showAll = isSoleVisible(target);
+    sidebarTargets.forEach((id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const wasHidden = el.style.display === 'none';
+      el.style.display = showAll ? '' : (id === target ? '' : 'none');
+      if (wasHidden && el.style.display !== 'none') resizeChartsIn(id);
+    });
+    document.querySelectorAll('.sidebar-item').forEach((b) => {
+      b.classList.toggle('section-hidden', !showAll && b.dataset.target !== target);
+    });
+  });
+});
+
+// ---- Chart Analysis ----
+const chartAnalysisTickerInput = document.getElementById('chartAnalysisTickerInput');
+const chartAnalysisBtn = document.getElementById('chartAnalysisBtn');
+const chartAnalysisStatus = document.getElementById('chartAnalysisStatus');
+const chartAnalysisOutput = document.getElementById('chartAnalysisOutput');
+
+async function generateChartAnalysis() {
+  const ticker = (chartAnalysisTickerInput.value || 'SPY').toUpperCase().trim();
+  chartAnalysisBtn.disabled = true;
+  chartAnalysisOutput.style.display = 'none';
+  chartAnalysisStatus.textContent = `Fetching bars and writing a technical read for ${ticker}...`;
+  chartAnalysisStatus.className = 'status';
+  try {
+    const res = await fetch(`/api/get-tiger-gex?mode=chart_analysis&symbol=${encodeURIComponent(ticker)}`);
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      throw new Error(data.error || `Request failed (${res.status})`);
+    }
+    chartAnalysisOutput.textContent = data.analysis;
+    chartAnalysisOutput.style.display = 'block';
+    chartAnalysisStatus.textContent = `${data.bars_used} daily bars used (${data.date_range?.[0]} to ${data.date_range?.[1]}).`;
+  } catch (err) {
+    chartAnalysisStatus.textContent = 'Chart analysis failed: ' + err.message;
+    chartAnalysisStatus.className = 'status error';
+  } finally {
+    chartAnalysisBtn.disabled = false;
+  }
+}
+chartAnalysisBtn.addEventListener('click', generateChartAnalysis);
 
 async function processGexData(data) {
   currentData = data;
