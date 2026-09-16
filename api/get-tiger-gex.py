@@ -302,6 +302,48 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             query = parse_qs(urlparse(self.path).query)
+
+            # Diagnostic mode: check whether this Tiger account has
+            # historical K-line access and what quota remains, without
+            # running any of the actual GEX fetch/compute logic below.
+            # Usage: /api/get-tiger-gex?mode=kline_quota
+            if query.get("mode", [None])[0] == "kline_quota":
+                try:
+                    quote_client = get_quote_client()
+                    quota_result = quote_client.get_kline_quota(with_details=True)
+                    # quota_result is typically a list of dicts (one per
+                    # kline type: 'kline', 'future_kline', 'option_kline')
+                    # - pass it through as-is rather than guessing its
+                    # exact shape, so whatever Tiger actually returns is
+                    # visible.
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        "kline_quota": quota_result,
+                        "note": "If this account has no historical-quote "
+                                "permission tier, Tiger may return an "
+                                "empty result or an error here rather "
+                                "than a quota breakdown - that itself is "
+                                "the answer.",
+                    }, default=str).encode())
+                except Exception as e:
+                    self.send_response(200)  # 200, not 500 - this IS the diagnostic answer
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        "kline_quota": None,
+                        "error": str(e),
+                        "note": "The kline_quota call itself failed - this "
+                                "usually means the account doesn't have "
+                                "historical K-line/bar access at all, "
+                                "rather than a transient network issue. "
+                                "Check Tiger Trade app > Profile > My "
+                                "Service > API Permissions for a "
+                                "historical-quote tier.",
+                    }).encode())
+                return
+
             symbol = query.get("symbol", ["SPY"])[0].upper()
             read_type = query.get("read_type", ["daily"])[0]
 
