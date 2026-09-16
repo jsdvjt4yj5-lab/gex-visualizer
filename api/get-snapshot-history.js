@@ -327,9 +327,34 @@ async function handleWeeklySummary(req, res, ticker) {
   });
 }
 
+// ---- delete (removes a wrongly-uploaded/wrongly-analysed snapshot) ----
+
+async function handleDelete(req, res, ticker, sessionDate) {
+  if (!sessionDate) {
+    return res.status(400).json({ error: 'Missing "session_date" query param (YYYY-MM-DD)' });
+  }
+  await runD1Query(
+    'DELETE FROM gex_snapshots WHERE ticker = ? AND session_date = ?',
+    [ticker, sessionDate]
+  );
+  return res.status(200).json({ ticker, session_date: sessionDate, deleted: true });
+}
+
 export default async function handler(req, res) {
+  if (req.method === 'DELETE') {
+    const { ticker, session_date } = req.query;
+    if (!ticker) {
+      return res.status(400).json({ error: 'Missing "ticker" query param' });
+    }
+    try {
+      return await handleDelete(req, res, ticker.toUpperCase(), session_date);
+    } catch (err) {
+      return res.status(500).json({ error: 'Server error', detail: String(err) });
+    }
+  }
+
   if (req.method !== 'GET') {
-    return res.status(405).json({ error: 'Use GET' });
+    return res.status(405).json({ error: 'Use GET or DELETE' });
   }
 
   const { ticker, action } = req.query;

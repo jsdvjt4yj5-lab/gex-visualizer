@@ -916,9 +916,16 @@ function renderHistory() {
   filtered.forEach((item) => {
     const div = document.createElement('div');
     div.className = 'history-item';
+    div.style.display = 'flex';
+    div.style.alignItems = 'center';
+    div.style.justifyContent = 'space-between';
     const when = new Date(item.captured_at).toLocaleString();
-    div.innerHTML = `<span>${item.ticker} · ${item.expiration} · ${item.read_type}</span><span>${when}</span>`;
-    div.addEventListener('click', () => {
+
+    const infoSpan = document.createElement('span');
+    infoSpan.style.cursor = 'pointer';
+    infoSpan.style.flex = '1';
+    infoSpan.innerHTML = `<span>${item.ticker} · ${item.expiration} · ${item.read_type}</span> <span style="color:#888; font-size:12px;">${when}</span>`;
+    infoSpan.addEventListener('click', () => {
       currentData = item;
       currentAnalysis = item.analysis || null;
       renderChart(item);
@@ -942,10 +949,69 @@ function renderHistory() {
       analyzeGexBtn.disabled = false;
       if (typeof updateCtButtonState === 'function') updateCtButtonState();
     });
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.textContent = '✕';
+    deleteBtn.title = 'Delete this snapshot (wrong upload or bad analysis)';
+    deleteBtn.style.cssText = 'background:none; border:none; color:#a33; cursor:pointer; font-size:14px; padding:4px 8px; margin-left:8px;';
+    deleteBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteHistoryItem(item);
+    });
+
+    div.appendChild(infoSpan);
+    div.appendChild(deleteBtn);
     historyList.appendChild(div);
   });
 
   updateWeeklyButtonState();
+}
+
+// Removes a wrongly-uploaded or wrongly-analysed snapshot from BOTH
+// localStorage (the browsing sidebar) and D1 (gex_snapshots - the source
+// weekly/monthly reads and Coffee and Tea's day-over-day comparison pull
+// from). Does NOT retroactively fix any Coffee and Tea session that
+// already used this snapshot before deletion - that's a separate stored
+// record (ct_sessions) this doesn't touch.
+async function deleteHistoryItem(item) {
+  const confirmed = confirm(
+    `Delete this ${item.ticker} snapshot from ${new Date(item.captured_at).toLocaleString()}?\n\n` +
+    `This removes it from your history and from cloud storage (so it won't be used in future ` +
+    `weekly/monthly reads or day-over-day comparisons). This cannot be undone.`
+  );
+  if (!confirmed) return;
+
+  // 1. Remove from localStorage (match by captured_at - effectively unique per item)
+  const existing = JSON.parse(localStorage.getItem('gex_history') || '[]');
+  const updated = existing.filter((i) => i.captured_at !== item.captured_at);
+  localStorage.setItem('gex_history', JSON.stringify(updated));
+
+  // 2. Remove from D1, best-effort - don't block the local deletion on this
+  const sessionDate = (item.captured_at || '').slice(0, 10);
+  if (sessionDate) {
+    try {
+      const res = await fetch(
+        `/api/get-snapshot-history?ticker=${encodeURIComponent(item.ticker)}&session_date=${encodeURIComponent(sessionDate)}`,
+        { method: 'DELETE' }
+      );
+      if (!res.ok) {
+        console.warn('D1 delete failed - snapshot removed locally but may still be in cloud storage:', await res.text());
+      }
+    } catch (err) {
+      console.warn('D1 delete request failed:', err);
+    }
+  }
+
+  // 3. Clear the display if the deleted item was currently showing
+  if (currentData && currentData.captured_at === item.captured_at) {
+    currentData = null;
+    currentAnalysis = null;
+    analysisBox.style.display = 'none';
+    pdfBtn.disabled = true;
+    analyzeGexBtn.disabled = true;
+  }
+
+  renderHistory();
 }
 
 async function fetchSnapshotHistoryFromD1(ticker, days) {
