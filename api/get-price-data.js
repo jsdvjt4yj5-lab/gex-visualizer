@@ -35,9 +35,14 @@ async function fetchYahooChart(symbol, period1, period2, interval) {
 }
 
 async function handleMa(req, res, symbol) {
-  // ~280 calendar days back covers 200+ trading days comfortably.
+  // Needs 200+ TRADING days, not calendar days. The US market trades
+  // ~252 days out of 365 (~69%), so a naive 280-calendar-day window
+  // averages only ~193 trading days - under the 200 needed, especially
+  // in stretches with clustered holidays (Thanksgiving/Christmas/New
+  // Year's). 380 calendar days comfortably clears 200 trading days even
+  // in a holiday-heavy window, with real margin to spare.
   const period2 = Math.floor(Date.now() / 1000);
-  const period1 = period2 - 280 * 24 * 60 * 60;
+  const period1 = period2 - 380 * 24 * 60 * 60;
 
   const { result, error } = await fetchYahooChart(symbol, period1, period2, '1d');
   if (error) return res.status(error.status).json(error.body);
