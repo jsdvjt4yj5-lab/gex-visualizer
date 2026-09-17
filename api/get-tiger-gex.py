@@ -455,6 +455,8 @@ CHART_ANALYSIS_SYSTEM_PROMPT = """You are a concise technical analyst. You
 receive an array of daily closing prices and volumes for a single ticker,
 ordered oldest to newest, with no options/gamma data at all - this is a
 pure price-action read, deliberately separate from any GEX-based analysis.
+You also receive the ticker's 30-day and 200-day simple moving averages
+(the 200-day may be unavailable if there isn't enough history yet).
 
 Produce a short written technical read covering:
 - The overall trend over the period shown (uptrend, downtrend, range-bound,
@@ -466,6 +468,15 @@ Produce a short written technical read covering:
   a clear range, a breakout or breakdown from a prior range)
 - How current price sits relative to recent levels (near a prior high/low,
   mid-range, etc.)
+- Where price sits relative to the 30-day and 200-day moving averages
+  (above/below/crossing), and whether either MA is close to (roughly
+  within 1% of) a support/resistance level you already identified from
+  price action alone - call out that confluence explicitly if it's
+  genuinely there (a technical level AND a moving average reinforcing
+  each other is a stronger signal than either alone). Only mention
+  confluence that's real - don't force a connection between unrelated
+  levels. If the 200-day MA isn't available, just work with the 30-day
+  and say so briefly rather than fabricating a 200-day read.
 
 Use **double asterisks** around the 2-4 word labels you want emphasized
 (e.g. a level name or the trend call) - do not overuse this, a few per
@@ -479,15 +490,25 @@ action, and never name a specific trade, strike, or options strategy."""
 
 
 def handle_chart_analysis(quote_client, symbol):
-    # 90 calendar days of daily bars comfortably covers enough trading
-    # days for a trend/support-resistance read without approaching
-    # Tiger's per-call kline quota concerns (that quota is about call
-    # frequency, not bar count per call - see the kline_quota diagnostic
-    # mode above).
-    bars = fetch_tiger_bars(quote_client, symbol, period="day", limit=90)
-    if len(bars) < 10:
+    # Single fetch of 210 calendar days of daily bars, reused for both the
+    # MA30/MA200 calc and the price-action payload below - avoids hitting
+    # Tiger's kline quota twice for one "Generate chart analysis" click
+    # (quota reset cadence is still unconfirmed, so minimizing calls
+    # matters here). 210 = 200 needed for the long MA + a small buffer,
+    # same margin handle_price_data_ma() already uses.
+    bars = fetch_tiger_bars(quote_client, symbol, period="day", limit=210)
+    if len(bars) < 30:
         return {"error": "Not enough daily bars to write a chart analysis"}, 422
 
+    closes = [b["close"] for b in bars]
+    ma30 = sma(closes, 30)
+    ma200 = sma(closes, 200)
+    ma200_available = len(closes) >= 200
+
+    # Trim the price-action payload sent to the model down to the most
+    # recent ~90 days - plenty for a trend/support-resistance read without
+    # bloating the prompt with the full 210-day MA lookback window.
+    display_bars = bars[-90:]
     condensed = [
         {
             "date": datetime.fromtimestamp(b["time_ms"] / 1000, tz=timezone.utc)
@@ -495,7 +516,7 @@ def handle_chart_analysis(quote_client, symbol):
             "close": round(b["close"], 2),
             "volume": b["volume"],
         }
-        for b in bars
+        for b in display_bars
     ]
     date_range = [condensed[0]["date"], condensed[-1]["date"]]
 
@@ -506,6 +527,9 @@ def handle_chart_analysis(quote_client, symbol):
     import urllib.request
     import urllib.error
 
+    ma_note = f"30-day MA: {ma30}"
+    ma_note += f", 200-day MA: {ma200}" if ma200_available else ", 200-day MA: not enough history yet"
+
     payload = json.dumps({
         "model": "claude-sonnet-4-6",
         "max_tokens": 600,
@@ -513,7 +537,8 @@ def handle_chart_analysis(quote_client, symbol):
         "messages": [{
             "role": "user",
             "content": f"Write the technical read for {symbol} from these "
-                       f"{len(condensed)} daily bars:\n\n{json.dumps(condensed)}",
+                       f"{len(condensed)} daily bars:\n\n{json.dumps(condensed)}"
+                       f"\n\nMoving averages ({ma_note}):",
         }],
     }).encode()
 
@@ -544,6 +569,9 @@ def handle_chart_analysis(quote_client, symbol):
         "analysis": text_block["text"].strip(),
         "bars_used": len(condensed),
         "date_range": date_range,
+        "ma30": ma30,
+        "ma200": ma200,
+        "ma200_available": ma200_available,
         "source": "tiger",
     }, 200
 
