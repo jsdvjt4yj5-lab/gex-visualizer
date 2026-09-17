@@ -451,6 +451,103 @@ def handle_price_data_volume_profile(quote_client, symbol, days):
     }, 200
 
 
+CHART_ANALYSIS_SYSTEM_PROMPT = """You are a concise technical analyst. You
+receive an array of daily closing prices and volumes for a single ticker,
+ordered oldest to newest, with no options/gamma data at all - this is a
+pure price-action read, deliberately separate from any GEX-based analysis.
+
+Produce a short written technical read covering:
+- The overall trend over the period shown (uptrend, downtrend, range-bound,
+  or a recent shift from one to another - name roughly when a shift
+  happened if one did)
+- Approximate support and resistance levels implied by where price has
+  repeatedly reversed or stalled in this data
+- Any notable pattern in the closes (e.g. higher highs/higher lows,
+  a clear range, a breakout or breakdown from a prior range)
+- How current price sits relative to recent levels (near a prior high/low,
+  mid-range, etc.)
+
+Use **double asterisks** around the 2-4 word labels you want emphasized
+(e.g. a level name or the trend call) - do not overuse this, a few per
+response is enough. Start with a one-line "Summary:" (bolded) followed by
+a single sentence capturing the whole read. Then 2-3 short paragraphs of
+detail. Plain prose, no bullet points, no other headers.
+
+This is not financial advice. Describe structure and price history only -
+never phrase anything as a directive to buy, sell, or take a specific
+action, and never name a specific trade, strike, or options strategy."""
+
+
+def handle_chart_analysis(quote_client, symbol):
+    # 90 calendar days of daily bars comfortably covers enough trading
+    # days for a trend/support-resistance read without approaching
+    # Tiger's per-call kline quota concerns (that quota is about call
+    # frequency, not bar count per call - see the kline_quota diagnostic
+    # mode above).
+    bars = fetch_tiger_bars(quote_client, symbol, period="day", limit=90)
+    if len(bars) < 10:
+        return {"error": "Not enough daily bars to write a chart analysis"}, 422
+
+    condensed = [
+        {
+            "date": datetime.fromtimestamp(b["time_ms"] / 1000, tz=timezone.utc)
+                .astimezone(EASTERN).date().isoformat(),
+            "close": round(b["close"], 2),
+            "volume": b["volume"],
+        }
+        for b in bars
+    ]
+    date_range = [condensed[0]["date"], condensed[-1]["date"]]
+
+    anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not anthropic_api_key:
+        return {"error": "ANTHROPIC_API_KEY is not configured"}, 500
+
+    import urllib.request
+    import urllib.error
+
+    payload = json.dumps({
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 600,
+        "system": CHART_ANALYSIS_SYSTEM_PROMPT,
+        "messages": [{
+            "role": "user",
+            "content": f"Write the technical read for {symbol} from these "
+                       f"{len(condensed)} daily bars:\n\n{json.dumps(condensed)}",
+        }],
+    }).encode()
+
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": anthropic_api_key,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        return {"error": "Anthropic API error", "detail": e.read().decode(errors="replace")}, 502
+    except Exception as e:
+        return {"error": "Anthropic request failed", "detail": str(e)}, 502
+
+    text_block = next((b for b in result.get("content", []) if b.get("type") == "text"), None)
+    if not text_block:
+        return {"error": "No text content in model response"}, 502
+
+    return {
+        "symbol": symbol,
+        "analysis": text_block["text"].strip(),
+        "bars_used": len(condensed),
+        "date_range": date_range,
+        "source": "tiger",
+    }, 200
+
+
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
@@ -515,6 +612,22 @@ class handler(BaseHTTPRequestHandler):
                         body, status = {"error": 'type must be "ma" or "volume-profile"'}, 400
                 except Exception as e:
                     body, status = {"error": "Tiger price-data fetch failed", "detail": str(e)}, 502
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(body, default=str).encode())
+                return
+
+            # Chart Analysis mode: a pure price-action technical read from
+            # Tiger's daily bars, deliberately separate from GEX reasoning.
+            # Usage: /api/get-tiger-gex?mode=chart_analysis&symbol=SPY
+            if query.get("mode", [None])[0] == "chart_analysis":
+                chart_symbol = query.get("symbol", ["SPY"])[0].upper()
+                try:
+                    chart_quote_client = get_quote_client()
+                    body, status = handle_chart_analysis(chart_quote_client, chart_symbol)
+                except Exception as e:
+                    body, status = {"error": "Chart analysis failed", "detail": str(e)}, 502
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
