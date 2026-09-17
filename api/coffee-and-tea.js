@@ -27,13 +27,19 @@ within ~2 points of POC, VAH/VAL, or a moving average is a stronger level
 than an isolated wall - weight these accordingly in market_structure and
 key_levels.
 
-2. Options pricing: when chain_data_available is false, use Black-Scholes
-with an assumed short-dated IV (document the assumption, e.g. ~13%) and
-actual days-to-expiry. Set pricing_source to "black_scholes_estimate".
-When chain_data_available is true, note pricing should ideally reflect
-real chain data, but since this endpoint doesn't have live bid/ask wired
-in yet, still use "black_scholes_estimate" and be honest about it - never
-claim "live_chain" unless real chain pricing was actually provided in the
+2. Options pricing: use Black-Scholes with actual days-to-expiry. For the
+IV input: if gex_data.gamma_inputs.underlying_iv_used_as_fallback is
+present, use that number - it's a real, live 30-day aggregate IV Tiger
+computed for the underlying (see get-tiger-gex.py), not a guess. Set
+iv_source to "tiger_underlying_iv" in this case. Only fall back to an
+assumed short-dated IV (document the assumption, e.g. ~13%) and set
+iv_source to "placeholder" if that field is genuinely absent from the
+input. Regardless of which IV source is used, set pricing_source to
+"black_scholes_estimate" - when chain_data_available is true, note
+pricing should ideally reflect real per-strike chain data, but since this
+endpoint doesn't have live bid/ask wired in yet, still use
+"black_scholes_estimate" and be honest about it - never claim
+"live_chain" unless real chain pricing was actually provided in the
 input.
 
 3. Strategy generation: map each market view to ONE of these defined-risk
@@ -87,14 +93,17 @@ can break the pin thesis independent of GEX positioning, and add an
 elevated-risk-window caution to range/credit strategy guidance in
 macro_context.per_strategy_guidance.
 
-10. REALIZED-VS-IMPLIED VOL CHECK (finalized): if the input includes
+10. REALIZED-VS-IMPLIED VOL CHECK (finalized): use the SAME iv_used_pct/
+iv_source determined in step 2 (the real Tiger-derived underlying IV when
+available, an assumed placeholder only as fallback) - do not compute or
+assume a separate IV number for this check. If the input includes
 realized_vol_10d_pct/realized_vol_20d_pct (may be absent - if so, state
-"insufficient data" in volatility_check and use the placeholder IV alone),
-compare against iv_used_pct. Classify verdict as "rich" (IV notably above
-realized - favors credit/premium-selling structures), "cheap" (IV notably
-below realized - favors long strangles/debit verticals), or "fair"
-(roughly in line). State strategy_tilt explaining which structures this
-favors and why.
+"insufficient data" in volatility_check and skip the comparison),
+compare realized vol against iv_used_pct. Classify verdict as "rich" (IV
+notably above realized - favors credit/premium-selling structures),
+"cheap" (IV notably below realized - favors long strangles/debit
+verticals), or "fair" (roughly in line). State strategy_tilt explaining
+which structures this favors and why.
 
 11. EOD FLOW CONTEXT (when flow_data is provided): summarize the session's
 skew and aggression tone (session_summary). Cross-reference each major GEX
@@ -141,7 +150,7 @@ prose, no markdown fences, no commentary outside the JSON:
 {
   "market_structure": { "summary": string, "key_levels": [{"strike": number, "type": "wall"|"flip_zone"|"support"|"resistance"|"confluence", "gex_usd_m": number|null, "significance": string}] },
   "macro_context": { "key_catalyst": string, "why_it_matters": string, "per_strategy_guidance": [{"strategy_type": string, "guidance": string}] },
-  "volatility_check": { "realized_vol_10d_pct": number, "realized_vol_20d_pct": number, "iv_used_pct": number, "iv_source": "placeholder"|"live_chain", "verdict": "rich"|"cheap"|"fair", "strategy_tilt": string },
+  "volatility_check": { "realized_vol_10d_pct": number, "realized_vol_20d_pct": number, "iv_used_pct": number, "iv_source": "tiger_underlying_iv"|"placeholder"|"live_chain", "verdict": "rich"|"cheap"|"fair", "strategy_tilt": string },
   "eod_flow_context": { "session_summary": string, "wall_cross_references": [{"strike": number, "gex_confirms": boolean, "detail": string}], "standout_prints": [{"strike": number, "detail": string}], "tension_or_alignment_note": string } | null,
   "trade_thesis": { "base_case": string, "upside_break": {"condition": string, "target_levels": [number]}, "downside_break": {"condition": string, "target_levels": [number]} },
   "strategies": [{
