@@ -2925,12 +2925,6 @@ function renderCtOutput(o) {
 
   html += ctSection('Strategy Comparison', stratRows);
 
-  html += ctSection('Probability of Profit Ranking', `
-    <table style="border-collapse:collapse; font-size:12.5px;">
-      <tr><th style="padding:3px 8px; color:#999; text-align:left;">Rank</th><th style="padding:3px 8px; color:#999; text-align:left;">Strategy</th><th style="padding:3px 8px; color:#999; text-align:right;">POP</th><th style="padding:3px 8px; color:#999; text-align:left;">Why</th></tr>
-      ${o.pop_ranking.map((p) => `<tr><td style="padding:3px 8px;">${p.rank}</td><td style="padding:3px 8px;">${p.strategy_name}</td><td style="padding:3px 8px; text-align:right;">${p.pop_pct}%</td><td style="padding:3px 8px;">${p.why}</td></tr>`).join('')}
-    </table>
-  `);
 
   if (o.day_over_day_comparison && o.day_over_day_comparison.has_prior_snapshot) {
     const d = o.day_over_day_comparison;
