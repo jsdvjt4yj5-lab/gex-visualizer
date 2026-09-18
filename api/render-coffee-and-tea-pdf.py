@@ -98,7 +98,7 @@ class VolatilityCheck(BaseModel):
     realized_vol_10d_pct: float
     realized_vol_20d_pct: float
     iv_used_pct: float
-    iv_source: Literal["placeholder", "live_chain"]
+    iv_source: Literal["tiger_underlying_iv", "user_assumed", "placeholder", "live_chain"]
     verdict: Literal["rich", "cheap", "fair"]
     strategy_tilt: str
 
