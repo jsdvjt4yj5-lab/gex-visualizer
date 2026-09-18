@@ -119,10 +119,15 @@ with detail null, since this endpoint doesn't have live bid/ask data wired
 in. Do not fabricate a green/yellow/red status without real spread/OI data.
 
 13. Day-over-day comparison: if prior_snapshot is provided, diff spot,
-POC, VAH/VAL, MA30, wall sizes at matching strikes, and whether the gamma
-regime itself changed. Set has_prior_snapshot accordingly - if no prior
-snapshot was provided, set it false and leave changes empty rather than
-fabricating a comparison.
+POC, VAH/VAL, MA30, and whether the gamma regime itself changed - always
+include these directly in changes, regardless of how much they moved.
+For wall-level GEX sizes at matching strikes: only include a wall if its
+$ GEX size changed by at least $50M in magnitude, and cap this to the 5
+walls with the largest magnitude change (largest first) - do not
+generate an entry for every wall regardless of size; most barely move
+and just add length without changing what's actionable. Set
+has_prior_snapshot accordingly - if no prior snapshot was provided, set
+it false and leave changes empty rather than fabricating a comparison.
 
 MANAGEMENT RULES:
 - GEX walls are "pay attention" lines, not hard floors/ceilings - they
@@ -227,6 +232,43 @@ async function saveSessionToD1(ticker, sessionDate, expiration, outputJson) {
   }
 }
 
+// Extract the last complete, parseable JSON object from raw model text.
+// This matters because the model sometimes writes out its reasoning -
+// occasionally including a full DRAFT JSON object - before settling on a
+// final, corrected JSON object at the end. Naive first-brace-to-last-brace
+// slicing then grabs everything from the draft's opening brace through the
+// final object's closing brace, including all the reasoning prose in
+// between, which is never valid JSON on its own. Scanning backward from
+// the end of the text and brace-balancing instead reliably isolates just
+// the LAST complete object - the one the model actually intends as its
+// answer - regardless of how much draft/reasoning text precedes it.
+function extractLastJSONObject(text) {
+  let searchEnd = text.length - 1;
+  while (searchEnd >= 0) {
+    const end = text.lastIndexOf('}', searchEnd);
+    if (end === -1) return null;
+    let depth = 0;
+    let start = -1;
+    for (let i = end; i >= 0; i--) {
+      if (text[i] === '}') depth++;
+      else if (text[i] === '{') {
+        depth--;
+        if (depth === 0) { start = i; break; }
+      }
+    }
+    if (start !== -1) {
+      try {
+        return JSON.parse(text.slice(start, end + 1));
+      } catch (e) {
+        // This closing brace didn't belong to a valid top-level object -
+        // keep searching further back in the text.
+      }
+    }
+    searchEnd = end - 1;
+  }
+  return null;
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Use POST' });
@@ -285,15 +327,8 @@ export default async function handler(req, res) {
     try {
       parsed = JSON.parse(cleaned);
     } catch (e) {
-      const firstBrace = cleaned.indexOf('{');
-      const lastBrace = cleaned.lastIndexOf('}');
-      if (firstBrace !== -1 && lastBrace > firstBrace) {
-        try {
-          parsed = JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
-        } catch (e2) {
-          return res.status(502).json({ error: 'Model did not return valid JSON', raw: cleaned });
-        }
-      } else {
+      parsed = extractLastJSONObject(cleaned);
+      if (!parsed) {
         return res.status(502).json({ error: 'Model did not return valid JSON', raw: cleaned });
       }
     }
