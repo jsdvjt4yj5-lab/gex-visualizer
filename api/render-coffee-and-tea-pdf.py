@@ -197,13 +197,6 @@ class Strategy(BaseModel):
         return self
 
 
-class PopRankEntry(BaseModel):
-    rank: int
-    strategy_name: str
-    pop_pct: float
-    why: str
-
-
 class SnapshotChange(BaseModel):
     metric: str
     prior: Optional[float] = None
@@ -223,7 +216,6 @@ class ReasoningOutput(BaseModel):
     eod_flow_context: Optional[EodFlowContext] = None
     trade_thesis: TradeThesis
     strategies: list[Strategy]
-    pop_ranking: list[PopRankEntry]
     day_over_day_comparison: Optional[DayOverDayComparison] = None
 
     @model_validator(mode="after")
@@ -485,11 +477,12 @@ def build_strategy_comparison(S, strategies):
 def build_sizing(S, strategies):
     S.append(Paragraph("Appendix B: Position Sizing, Profit Targets &amp; Stop-Losses", H1))
     rows = [[_p("Strategy", CELLB), _p("Expiry", CELLB), _p("Contracts", CELLB), _p("Max Loss", CELLB),
-             _p("Max Profit", CELLB), _p("50% Target", CELLB), _p("Stop-Loss", CELLB)]]
+             _p("Max Profit", CELLB), _p("50% Target", CELLB), _p("Stop-Loss", CELLB), _p("POP", CELLB)]]
     for s in strategies:
         sizing = s.sizing
         pt = s.profit_target_50pct
         sl = s.stop_loss
+        pop_str = f"{s.pop_pct:g}%" if s.pop_pct is not None else "&mdash;"
         rows.append([
             _p(s.name),
             _p(_strategy_expiry_str(s.legs)),
@@ -498,8 +491,9 @@ def build_sizing(S, strategies):
             _p(_fmt_usd(sizing.total_max_profit_usd)),
             _p(_fmt_usd(pt.total_profit_usd)),
             _p(_fmt_usd(sl.total_loss_at_stop_usd, allow_none="Monitor manually")),
+            _p(pop_str),
         ])
-    S.append(_table(rows, [0.95*inch, 0.75*inch, 0.55*inch, 0.8*inch, 0.8*inch, 0.75*inch, 1.0*inch]))
+    S.append(_table(rows, [0.85*inch, 0.7*inch, 0.5*inch, 0.7*inch, 0.7*inch, 0.65*inch, 0.9*inch, 0.5*inch]))
     S.append(Spacer(1, 6))
     for s in strategies:
         S.append(Paragraph(
@@ -507,33 +501,44 @@ def build_sizing(S, strategies):
     S.append(Spacer(1, 4))
 
 
-def build_pop_ranking(S, pop_ranking, strategies):
-    S.append(PageBreak())
-    S.append(Paragraph("Appendix C: Probability-of-Profit Ranking", H1))
-    expiry_by_name = {s.name: _strategy_expiry_str(s.legs) for s in strategies}
-    rows = [[_p("Rank", CELLB), _p("Strategy", CELLB), _p("Expiry", CELLB), _p("POP", CELLB), _p("Why", CELLB)]]
-    for entry in sorted(pop_ranking, key=lambda e: e.rank):
-        rows.append([
-            _p(entry.rank),
-            _p(entry.strategy_name),
-            _p(expiry_by_name.get(entry.strategy_name, "&mdash;")),
-            _p(f"{entry.pop_pct:g}%"),
-            _p(entry.why),
-        ])
-    S.append(_table(rows, [0.4*inch, 1.15*inch, 0.7*inch, 0.5*inch, 3.15*inch]))
-    S.append(Spacer(1, 4))
-
-
 def build_day_over_day(S, dod):
     if dod is None or not dod.has_prior_snapshot:
         return
-    S.append(Paragraph("Appendix D: Day-over-Day Comparison", H1))
+    S.append(Paragraph("Appendix C: Day-over-Day Comparison", H1))
     if dod.changes:
+        # A session can carry 8-9+ wall-level rows here, most of which
+        # barely moved and just add length without changing what's worth
+        # acting on. Always keep the headline context (spot, gamma_regime),
+        # and for the rest, only show walls that moved meaningfully,
+        # capped at the largest few moves - full data still lives in D1
+        # if a deeper look is ever needed.
+        HEADLINE_METRICS = {"spot", "gamma_regime"}
+        WALL_CHANGE_THRESHOLD_USD_M = 50
+        MAX_WALL_ROWS = 5
+
+        headline = [c for c in dod.changes if c.metric in HEADLINE_METRICS]
+        wall_changes = [c for c in dod.changes if c.metric not in HEADLINE_METRICS]
+
+        def _magnitude(c):
+            if c.prior is None or c.current is None:
+                return 0
+            return abs(c.current - c.prior)
+
+        significant_walls = sorted(
+            [c for c in wall_changes if _magnitude(c) >= WALL_CHANGE_THRESHOLD_USD_M],
+            key=_magnitude, reverse=True,
+        )
+        shown_walls = significant_walls[:MAX_WALL_ROWS]
+        omitted_count = len(wall_changes) - len(shown_walls)
+
         rows = [[_p("Metric", CELLB), _p("Prior", CELLB), _p("Current", CELLB), _p("Note", CELLB)]]
-        for c in dod.changes:
+        for c in headline + shown_walls:
             rows.append([_p(c.metric), _p(c.prior if c.prior is not None else "&mdash;"),
                          _p(c.current if c.current is not None else "&mdash;"), _p(c.delta_note)])
         S.append(_table(rows, [1.3*inch, 0.8*inch, 0.8*inch, 3.3*inch]))
+        if omitted_count > 0:
+            S.append(Paragraph(
+                f"{omitted_count} additional wall level(s) with smaller changes omitted for brevity.", NOTE))
     S.append(Spacer(1, 4))
 
 
@@ -565,7 +570,6 @@ def generate_pdf(output: ReasoningOutput, session_date: str, expiration: str,
     build_thesis(S, output.trade_thesis)
     build_strategy_comparison(S, output.strategies)
     build_sizing(S, output.strategies)
-    build_pop_ranking(S, output.pop_ranking, output.strategies)
     build_day_over_day(S, output.day_over_day_comparison)
     build_footer(S)
     doc.build(S)
