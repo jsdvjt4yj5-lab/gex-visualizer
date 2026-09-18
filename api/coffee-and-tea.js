@@ -149,7 +149,7 @@ prose, no markdown fences, no commentary outside the JSON:
 {
   "market_structure": { "summary": string, "key_levels": [{"strike": number, "type": "wall"|"flip_zone"|"support"|"resistance"|"confluence", "gex_usd_m": number|null, "significance": string}] },
   "macro_context": { "key_catalyst": string, "why_it_matters": string, "per_strategy_guidance": [{"strategy_type": string, "guidance": string}] },
-  "volatility_check": { "realized_vol_10d_pct": number, "realized_vol_20d_pct": number, "iv_used_pct": number, "iv_source": "tiger_underlying_iv"|"placeholder"|"live_chain", "verdict": "rich"|"cheap"|"fair", "strategy_tilt": string },
+  "volatility_check": { "realized_vol_10d_pct": number, "realized_vol_20d_pct": number, "iv_used_pct": number, "iv_source": "tiger_underlying_iv"|"user_assumed"|"placeholder"|"live_chain", "verdict": "rich"|"cheap"|"fair", "strategy_tilt": string },
   "eod_flow_context": { "session_summary": string, "wall_cross_references": [{"strike": number, "gex_confirms": boolean, "detail": string}], "standout_prints": [{"strike": number, "detail": string}], "tension_or_alignment_note": string } | null,
   "trade_thesis": { "base_case": string, "upside_break": {"condition": string, "target_levels": [number]}, "downside_break": {"condition": string, "target_levels": [number]} },
   "strategies": [{
@@ -288,21 +288,42 @@ export default async function handler(req, res) {
   if (!input.gex_data || !input.portfolio_size_usd) {
     return res.status(400).json({ error: 'Missing gex_data or portfolio_size_usd in request body' });
   }
-  const spot = input.gex_data.spot_price;
+  const spot = input.gex_data.spot;
   if (typeof spot !== 'number' || spot <= 0) {
-    return res.status(400).json({ error: 'Missing or invalid gex_data.spot_price in request body' });
+    return res.status(400).json({ error: 'Missing or invalid gex_data.spot in request body' });
   }
 
   // Determine IV server-side, before calling the model, rather than
-  // relying on the model to read and correctly apply this rule itself -
-  // this is the same field/fallback logic the spec used to ask the model
-  // to follow, just made deterministic. underlying_iv_used_as_fallback is
-  // stored as a decimal fraction (e.g. 0.13) by get-tiger-gex.py - see
-  // HARD_FALLBACK_IV = 0.15 there - so it's converted to a percentage here.
+  // relying on the model to read and correctly apply this rule itself.
+  // Three tiers, checked in order:
+  // 1. gex_data.gamma_inputs.underlying_iv_used_as_fallback - a real,
+  //    Tiger-computed 30-day IV. Stored as a decimal fraction (e.g. 0.13)
+  //    by get-tiger-gex.py - see HARD_FALLBACK_IV = 0.15 there - so it's
+  //    converted to a percentage here. NOTE: index.html's
+  //    buildGexDataFromCurrent() currently does NOT include gamma_inputs
+  //    in what it sends, so this tier will not fire via the real UI flow
+  //    today - kept as tier 1 in case a future caller does provide it,
+  //    rather than removed.
+  // 2. input.assumed_iv_pct - a deliberate, user-set value from the
+  //    ctAssumedIv field on the page (defaults to 13 there too, but is
+  //    editable) - this is what the current UI flow actually sends, and
+  //    is a real chosen input, not a guess, so it's labeled accordingly.
+  // 3. A hardcoded fallback, only if neither of the above is present.
   const underlyingIvFraction = input.gex_data.gamma_inputs?.underlying_iv_used_as_fallback;
   const hasRealIv = typeof underlyingIvFraction === 'number' && underlyingIvFraction > 0;
-  const ivUsedPct = hasRealIv ? round2(underlyingIvFraction * 100) : ASSUMED_FALLBACK_IV_PCT;
-  const ivSource = hasRealIv ? 'tiger_underlying_iv' : 'placeholder';
+  const hasUserAssumedIv = typeof input.assumed_iv_pct === 'number' && input.assumed_iv_pct > 0;
+
+  let ivUsedPct, ivSource;
+  if (hasRealIv) {
+    ivUsedPct = round2(underlyingIvFraction * 100);
+    ivSource = 'tiger_underlying_iv';
+  } else if (hasUserAssumedIv) {
+    ivUsedPct = round2(input.assumed_iv_pct);
+    ivSource = 'user_assumed';
+  } else {
+    ivUsedPct = ASSUMED_FALLBACK_IV_PCT;
+    ivSource = 'placeholder';
+  }
 
   try {
     const systemPrompt = `You are running Protocol Coffee and Tea, a defined-risk options trading session workflow. Follow this specification exactly.\n\n${SPEC}\n\n${OUTPUT_SCHEMA_NOTE}`;
