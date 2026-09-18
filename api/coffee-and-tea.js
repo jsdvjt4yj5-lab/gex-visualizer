@@ -10,6 +10,18 @@
 // spec's Section 9 lists as "open" but were resolved in a later
 // conversation: stop-loss rule, realized-vs-implied vol check, and the
 // liquidity/bid-ask check thresholds.
+//
+// Pricing/sizing/PoP math moved server-side (see lib/options-pricing.js)
+// rather than being computed by the model by hand - a real session
+// (Sept 17/18) showed the model working through Black-Scholes d1/d2 by
+// hand, making an arithmetic slip mid-calculation, and self-correcting
+// visibly in its response text before ever emitting JSON. That's both a
+// reliability risk (self-correction isn't guaranteed every time) and a
+// major source of generated tokens contributing to this endpoint's 504
+// timeouts. The model still chooses which strikes/structure to propose
+// (a genuine judgment call based on the GEX read) - it no longer prices
+// them.
+import { computeStrategyEconomics } from '../lib/options-pricing.js';
 
 const SPEC = `PROTOCOL COFFEE AND TEA - full workflow specification
 
@@ -27,20 +39,14 @@ within ~2 points of POC, VAH/VAL, or a moving average is a stronger level
 than an isolated wall - weight these accordingly in market_structure and
 key_levels.
 
-2. Options pricing: use Black-Scholes with actual days-to-expiry. For the
-IV input: if gex_data.gamma_inputs.underlying_iv_used_as_fallback is
-present, use that number - it's a real, live 30-day aggregate IV Tiger
-computed for the underlying (see get-tiger-gex.py), not a guess. Set
-iv_source to "tiger_underlying_iv" in this case. Only fall back to an
-assumed short-dated IV (document the assumption, e.g. ~13%) and set
-iv_source to "placeholder" if that field is genuinely absent from the
-input. Regardless of which IV source is used, set pricing_source to
-"black_scholes_estimate" - when chain_data_available is true, note
-pricing should ideally reflect real per-strike chain data, but since this
-endpoint doesn't have live bid/ask wired in yet, still use
-"black_scholes_estimate" and be honest about it - never claim
-"live_chain" unless real chain pricing was actually provided in the
-input.
+2. Strike selection: the input includes iv_used_pct and iv_source directly -
+these are provided values, already determined server-side (a real
+Tiger-derived underlying IV when available, an assumed fallback only
+otherwise). Copy them verbatim into volatility_check - do not assume,
+recompute, or second-guess them. You do NOT need to price legs, compute
+credit/debit amounts, position sizing, or probability of profit - all of
+that is computed server-side from the strikes you choose. Your job here
+is choosing which strikes form each structure, based on the GEX read.
 
 3. Strategy generation: map each market view to ONE of these defined-risk
 structures - NEVER a naked short strike:
@@ -55,30 +61,20 @@ structures - NEVER a naked short strike:
 Generate exactly 3 of the most relevant structures given the actual market
 structure read, not more - this keeps the total response length reliable.
 
-4. Position sizing: default risk budget is 5% of portfolio_size_usd = max
-loss per structure. contracts = floor(risk_budget / max_loss_per_contract).
-State this assumption in the guidance text.
-
-5. 50%-profit-target exits:
-- Credit structures: target = close at 50% of credit collected decayed
-  (banked profit = credit / 2 per contract)
-- Debit structures: target = close at 1.5x debit paid (banked profit =
-  debit / 2 per contract)
+4. Profit-target narrative: for each strategy's profit_target_est_path,
+briefly describe the path to the 50% target in plain terms (e.g. "Theta
+decay with spot holding the range through mid-session") - the actual
+target price and dollar amounts are computed server-side from your
+chosen legs, you're only providing the qualitative description.
 - Never propose a calendar in this workflow (single-expiry chain data only)
 
-6. STOP-LOSS RULE (finalized): exit at 50% of the structure's max loss
-(price-based, mirroring the profit-target rule), PLUS a structural-
-invalidation trigger (confirmed break of the level the trade depended on,
-e.g. "volume-confirmed close below 755"). The structural trigger takes
-precedence and can fire independently, even before the 50%-loss price
-level is reached - whichever condition hits first governs the exit.
-
-7. Probability of profit: use the lognormal/Black-Scholes-implied
-distribution at expiry (same IV/DTE as pricing) to compute probability
-spot finishes within the structure's profit zone - a full breakeven-range
-calculation, not a delta shortcut. Set pop_pct on each strategy object.
-No ranking or written justification needed - the number speaks for
-itself and the frontend can sort by it directly.
+5. STOP-LOSS narrative: for each strategy's stop_loss_structural_trigger,
+describe the structural invalidation condition (confirmed break of the
+level the trade depended on, e.g. "volume-confirmed close below 755").
+The actual 50%-max-loss price trigger and dollar amounts are computed
+server-side - you're only providing this structural description. The
+structural trigger takes precedence over the price-based stop and can
+fire independently, even before the 50%-loss level is reached.
 
 8. Entry triggers:
 - Neutral/range strategies: near the center of the expected range
@@ -93,9 +89,8 @@ can break the pin thesis independent of GEX positioning, and add an
 elevated-risk-window caution to range/credit strategy guidance in
 macro_context.per_strategy_guidance.
 
-10. REALIZED-VS-IMPLIED VOL CHECK (finalized): use the SAME iv_used_pct/
-iv_source determined in step 2 (the real Tiger-derived underlying IV when
-available, an assumed placeholder only as fallback) - do not compute or
+10. REALIZED-VS-IMPLIED VOL CHECK (finalized): use the iv_used_pct/
+iv_source provided directly in the input (see step 2) - do not compute or
 assume a separate IV number for this check. If the input includes
 realized_vol_10d_pct/realized_vol_20d_pct (may be absent - if so, state
 "insufficient data" in volatility_check and skip the comparison),
@@ -139,12 +134,11 @@ MANAGEMENT RULES:
 DISCLAIMERS: All figures illustrative unless pricing_source is
 "live_chain". This is not financial advice. GEX walls are dealer-hedging
 mechanics, not guarantees. Every strategy MUST be defined-risk - a
-response with any naked leg or missing max_loss_per_contract_usd will be
-rejected downstream.`;
+response with any naked/uncovered leg will be rejected downstream.`;
 
 const OUTPUT_SCHEMA_NOTE = `Keep every text field short - hard limits, not suggestions:
-- "summary", "why_it_matters", "session_summary", "base_case", "est_path", "strategy_tilt": 25 words max each
-- "significance", "detail", "guidance", "structural_trigger", "entry_trigger", "condition", "delta_note", "tension_or_alignment_note": 15 words max each
+- "summary", "why_it_matters", "session_summary", "base_case", "profit_target_est_path", "strategy_tilt": 25 words max each
+- "significance", "detail", "guidance", "stop_loss_structural_trigger", "entry_trigger", "condition", "delta_note", "tension_or_alignment_note": 15 words max each
 These are real limits because this output has many nested sections and exactly
 3 full strategies - verbosity in any one field risks the whole response being
 cut off before it completes, which fails the entire session. A shorter,
@@ -161,21 +155,33 @@ prose, no markdown fences, no commentary outside the JSON:
   "strategies": [{
     "name": string, "view": string,
     "legs": [{"action": "buy"|"sell", "type": "C"|"P", "strike": number, "expiry": string}],
-    "pricing": {"credit_or_debit": "credit"|"debit", "amount_per_contract_usd": number, "max_loss_per_contract_usd": number, "max_profit_per_contract_usd": number|null, "pricing_source": "black_scholes_estimate"|"live_chain"},
-    "sizing": {"risk_budget_pct": number, "contracts": number, "total_max_loss_usd": number, "total_max_profit_usd": number|null},
-    "profit_target_50pct": {"trigger_price_usd": number, "total_profit_usd": number, "est_path": string},
-    "stop_loss": {"price_trigger_usd": number|null, "total_loss_at_stop_usd": number|null, "structural_trigger": string},
-    "pop_pct": number|null,
+    "profit_target_est_path": string,
+    "stop_loss_structural_trigger": string,
     "entry_trigger": string,
     "liquidity_check": {"status": "awaiting_live_chain"|"green"|"yellow"|"red", "detail": string|null}
   }],
   "day_over_day_comparison": {"has_prior_snapshot": boolean, "changes": [{"metric": string, "prior": number|null, "current": number|null, "delta_note": string}]} | null
 }`;
 
+// Guard before pricing: computeStrategyEconomics assumes non-empty legs,
+// so this has to run before the pricing/PoP merge step, not after.
+function assertStrategiesHaveLegs(strategies) {
+  if (!Array.isArray(strategies) || strategies.length === 0) {
+    throw new Error('Reasoning output has no strategies - rejected');
+  }
+  for (const s of strategies) {
+    if (!Array.isArray(s.legs) || s.legs.length === 0) {
+      throw new Error(`Strategy "${s.name}" has no legs defined - refusing to price a strategy with no structure`);
+    }
+  }
+}
+
 // Lightweight structural validation mirroring the Python schema's
 // defined_risk_only and at_least_one_strategy validators - reject a
 // malformed response before it reaches the frontend rather than let a
-// bad structure through silently.
+// bad structure through silently. Runs AFTER the pricing merge below, so
+// max_loss_per_contract_usd is always a real number by this point -
+// this remains as a final defense-in-depth check, not the primary guard.
 function validateOutput(output) {
   if (!Array.isArray(output.strategies) || output.strategies.length === 0) {
     throw new Error('Reasoning output has no strategies - rejected');
@@ -269,6 +275,10 @@ function extractLastJSONObject(text) {
   return null;
 }
 
+const round2 = (x) => Math.round(x * 100) / 100;
+const ASSUMED_FALLBACK_IV_PCT = 13;
+const RISK_BUDGET_PCT = 5;
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Use POST' });
@@ -278,9 +288,25 @@ export default async function handler(req, res) {
   if (!input.gex_data || !input.portfolio_size_usd) {
     return res.status(400).json({ error: 'Missing gex_data or portfolio_size_usd in request body' });
   }
+  const spot = input.gex_data.spot_price;
+  if (typeof spot !== 'number' || spot <= 0) {
+    return res.status(400).json({ error: 'Missing or invalid gex_data.spot_price in request body' });
+  }
+
+  // Determine IV server-side, before calling the model, rather than
+  // relying on the model to read and correctly apply this rule itself -
+  // this is the same field/fallback logic the spec used to ask the model
+  // to follow, just made deterministic. underlying_iv_used_as_fallback is
+  // stored as a decimal fraction (e.g. 0.13) by get-tiger-gex.py - see
+  // HARD_FALLBACK_IV = 0.15 there - so it's converted to a percentage here.
+  const underlyingIvFraction = input.gex_data.gamma_inputs?.underlying_iv_used_as_fallback;
+  const hasRealIv = typeof underlyingIvFraction === 'number' && underlyingIvFraction > 0;
+  const ivUsedPct = hasRealIv ? round2(underlyingIvFraction * 100) : ASSUMED_FALLBACK_IV_PCT;
+  const ivSource = hasRealIv ? 'tiger_underlying_iv' : 'placeholder';
 
   try {
     const systemPrompt = `You are running Protocol Coffee and Tea, a defined-risk options trading session workflow. Follow this specification exactly.\n\n${SPEC}\n\n${OUTPUT_SCHEMA_NOTE}`;
+    const modelInput = { ...input, iv_used_pct: ivUsedPct, iv_source: ivSource };
 
     const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -294,7 +320,7 @@ export default async function handler(req, res) {
         max_tokens: 32000,
         system: systemPrompt,
         messages: [
-          { role: 'user', content: JSON.stringify(input, null, 2) },
+          { role: 'user', content: JSON.stringify(modelInput, null, 2) },
         ],
       }),
     });
@@ -331,6 +357,48 @@ export default async function handler(req, res) {
       if (!parsed) {
         return res.status(502).json({ error: 'Model did not return valid JSON', raw: cleaned });
       }
+    }
+
+    // Pricing/sizing/PoP merge: the model chose strikes/structure (a
+    // judgment call) - everything numeric about those strikes is computed
+    // here, deterministically, rather than trusted from the model's own
+    // output. See lib/options-pricing.js for why this moved server-side.
+    try {
+      assertStrategiesHaveLegs(parsed.strategies);
+      parsed.strategies = parsed.strategies.map((s) => {
+        const econ = computeStrategyEconomics({
+          legs: s.legs,
+          spot,
+          ivUsedPct,
+          sessionDate: input.session_date,
+          expiration: input.expiration,
+          portfolioSizeUsd: input.portfolio_size_usd,
+          riskBudgetPct: RISK_BUDGET_PCT,
+        });
+        return {
+          name: s.name,
+          view: s.view,
+          legs: s.legs,
+          pricing: econ.pricing,
+          sizing: econ.sizing,
+          profit_target_50pct: { ...econ.profit_target_50pct, est_path: s.profit_target_est_path },
+          stop_loss: { ...econ.stop_loss, structural_trigger: s.stop_loss_structural_trigger },
+          pop_pct: econ.pop_pct,
+          entry_trigger: s.entry_trigger,
+          liquidity_check: s.liquidity_check,
+        };
+      });
+    } catch (pricingErr) {
+      return res.status(502).json({ error: `Pricing failed: ${pricingErr.message}`, raw: parsed });
+    }
+
+    // Force the server-determined IV into the response, overriding
+    // whatever the model echoed - guarantees consistency with what was
+    // actually used to price every strategy above, rather than trusting
+    // the model copied the provided value correctly.
+    if (parsed.volatility_check) {
+      parsed.volatility_check.iv_used_pct = ivUsedPct;
+      parsed.volatility_check.iv_source = ivSource;
     }
 
     try {
