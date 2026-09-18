@@ -76,9 +76,9 @@ level is reached - whichever condition hits first governs the exit.
 7. Probability of profit: use the lognormal/Black-Scholes-implied
 distribution at expiry (same IV/DTE as pricing) to compute probability
 spot finishes within the structure's profit zone - a full breakeven-range
-calculation, not a delta shortcut. Rank ALL strategies highest to lowest
-POP in pop_ranking, with a one-line "why" citing single-sided vs two-sided
-structure and breakeven distance.
+calculation, not a delta shortcut. Set pop_pct on each strategy object.
+No ranking or written justification needed - the number speaks for
+itself and the frontend can sort by it directly.
 
 8. Entry triggers:
 - Neutral/range strategies: near the center of the expected range
@@ -139,7 +139,7 @@ rejected downstream.`;
 
 const OUTPUT_SCHEMA_NOTE = `Keep every text field short - hard limits, not suggestions:
 - "summary", "why_it_matters", "session_summary", "base_case", "est_path", "strategy_tilt": 25 words max each
-- "significance", "detail", "guidance", "structural_trigger", "entry_trigger", "condition", "why", "delta_note", "tension_or_alignment_note": 15 words max each
+- "significance", "detail", "guidance", "structural_trigger", "entry_trigger", "condition", "delta_note", "tension_or_alignment_note": 15 words max each
 These are real limits because this output has many nested sections and exactly
 3 full strategies - verbosity in any one field risks the whole response being
 cut off before it completes, which fails the entire session. A shorter,
@@ -164,7 +164,6 @@ prose, no markdown fences, no commentary outside the JSON:
     "entry_trigger": string,
     "liquidity_check": {"status": "awaiting_live_chain"|"green"|"yellow"|"red", "detail": string|null}
   }],
-  "pop_ranking": [{"rank": number, "strategy_name": string, "pop_pct": number, "why": string}],
   "day_over_day_comparison": {"has_prior_snapshot": boolean, "changes": [{"metric": string, "prior": number|null, "current": number|null, "delta_note": string}]} | null
 }`;
 
