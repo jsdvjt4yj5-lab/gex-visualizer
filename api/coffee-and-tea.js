@@ -23,6 +23,62 @@
 // them.
 import { computeStrategyEconomics } from '../lib/options-pricing.js';
 
+// ---- Options expiration calendar facts (no API call - pure date math) ----
+// Kept local to this file rather than a shared lib, matching this repo's
+// existing pattern of small self-contained date helpers per endpoint
+// (e.g. the NYSE holiday calculator duplicated client-side in index.html).
+function thirdFriday(year, monthIndex) {
+  // monthIndex is 0-based (0=Jan) to match JS Date conventions.
+  const first = new Date(Date.UTC(year, monthIndex, 1));
+  const firstFridayOffset = (5 - first.getUTCDay() + 7) % 7; // Sun=0..Sat=6, Friday=5
+  const d = new Date(Date.UTC(year, monthIndex, 1 + firstFridayOffset + 14));
+  return d.toISOString().slice(0, 10);
+}
+
+function nextMonthlyOpex(fromDateStr) {
+  let [y, m] = fromDateStr.split('-').map(Number);
+  m -= 1; // to 0-based
+  for (let i = 0; i < 4; i++) {
+    const candidate = thirdFriday(y, m);
+    if (candidate >= fromDateStr) return candidate;
+    m += 1;
+    if (m > 11) { m = 0; y += 1; }
+  }
+  return null;
+}
+
+function nextTripleWitching(fromDateStr) {
+  const quarterMonths = [2, 5, 8, 11]; // 0-based: Mar, Jun, Sep, Dec
+  const [fromYear, fromMonth] = fromDateStr.split('-').map(Number);
+  let y = fromYear;
+  for (let i = 0; i < 6; i++) {
+    for (const m of quarterMonths) {
+      if (y === fromYear && m < fromMonth - 1) continue;
+      const candidate = thirdFriday(y, m);
+      if (candidate >= fromDateStr) return candidate;
+    }
+    y += 1;
+  }
+  return null;
+}
+
+// Best-effort calendar note for one date (session_date or expiration) -
+// purely date math, never GEX/options-chain data, so it's always
+// available regardless of chain data quality or D1 storage state.
+function opexContextForDate(dateStr) {
+  if (!dateStr) return null;
+  const nextOpex = nextMonthlyOpex(dateStr);
+  const nextWitching = nextTripleWitching(dateStr);
+  if (!nextOpex || !nextWitching) return null;
+  return {
+    date: dateStr,
+    is_monthly_opex: nextOpex === dateStr,
+    is_triple_witching: nextWitching === dateStr,
+    next_monthly_opex: nextOpex,
+    next_triple_witching: nextWitching,
+  };
+}
+
 const SPEC = `PROTOCOL COFFEE AND TEA - full workflow specification
 
 PURPOSE: A recurring session workflow that turns a GEX (gamma exposure)
@@ -88,6 +144,21 @@ inside the expiration window, flag it explicitly in trade_thesis, note it
 can break the pin thesis independent of GEX positioning, and add an
 elevated-risk-window caution to range/credit strategy guidance in
 macro_context.per_strategy_guidance.
+
+9a. Options expiration catalyst tie-in: the input's
+options_expiration_context gives session_date and expiration each a
+calendar fact (is_monthly_opex, is_triple_witching, next_monthly_opex,
+next_triple_witching) - purely date math, not GEX or chain data. If
+is_monthly_opex or is_triple_witching is true for session_date or
+expiration, treat it the same as a macro_events_this_window catalyst:
+flag it explicitly in trade_thesis (name which one - monthly op-ex or
+the larger quarterly triple witching), note that large expiring open
+interest can drive pinning toward a max-pain-like level into the close
+and/or a volatility pickup right after as dealer hedges roll off, and
+add the same elevated-risk-window caution to range/credit strategy
+guidance in macro_context.per_strategy_guidance. If neither date is
+true, do not mention op-ex/triple witching at all - this is a same-day
+flag only, never a forward-looking "op-ex is coming up in N weeks" note.
 
 10. REALIZED-VS-IMPLIED VOL CHECK (finalized): use the iv_used_pct/
 iv_source provided directly in the input (see step 2) - do not compute or
@@ -327,7 +398,21 @@ export default async function handler(req, res) {
 
   try {
     const systemPrompt = `You are running Protocol Coffee and Tea, a defined-risk options trading session workflow. Follow this specification exactly.\n\n${SPEC}\n\n${OUTPUT_SCHEMA_NOTE}`;
-    const modelInput = { ...input, iv_used_pct: ivUsedPct, iv_source: ivSource };
+    // Calendar-computed, no chain/GEX data involved - always available
+    // even when macro_events_this_window (an external-provider fetch)
+    // isn't. Session date and expiration are usually the same day for
+    // this single-expiry workflow, but both are checked independently
+    // in case they ever differ.
+    const optionsExpirationContext = {
+      session_date: opexContextForDate(input.session_date),
+      expiration: opexContextForDate(input.expiration),
+    };
+    const modelInput = {
+      ...input,
+      iv_used_pct: ivUsedPct,
+      iv_source: ivSource,
+      options_expiration_context: optionsExpirationContext,
+    };
 
     const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',

@@ -288,6 +288,74 @@ def fetch_latest_snapshot_from_d1(ticker):
         return None
 
 
+def third_friday(year, month):
+    """The date of the third Friday of a given month - the standard
+    monthly equity/index options expiration date."""
+    first = date(year, month, 1)
+    first_friday_offset = (4 - first.weekday()) % 7  # Mon=0..Sun=6, Friday=4
+    return first + timedelta(days=first_friday_offset + 14)
+
+
+def next_monthly_opex(from_date):
+    """The next monthly options expiration (third Friday) on or after
+    from_date."""
+    y, m = from_date.year, from_date.month
+    for _ in range(4):
+        candidate = third_friday(y, m)
+        if candidate >= from_date:
+            return candidate
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+    return None
+
+
+def next_triple_witching(from_date):
+    """The next quarterly triple-witching date (third Friday of March,
+    June, September, or December) on or after from_date - the date stock
+    index futures, stock index options, and equity options all expire
+    together, historically associated with elevated volume/volatility."""
+    quarter_months = [3, 6, 9, 12]
+    y = from_date.year
+    for _ in range(6):
+        for m in quarter_months:
+            if y == from_date.year and m < from_date.month:
+                continue
+            candidate = third_friday(y, m)
+            if candidate >= from_date:
+                return candidate
+        y += 1
+    return None
+
+
+def opex_context_note(today_date):
+    """Best-effort, purely calendar-computed (no API call) note on where
+    today sits relative to the next monthly options expiration and next
+    quarterly triple witching - used to give Chart Analysis awareness of
+    expiration-driven price behavior (pinning into the close, a
+    volatility pickup right after as dealer hedges roll off) without any
+    GEX/options-chain data at all, so it works even when the D1 GEX
+    reference (see fetch_latest_snapshot_from_d1) is unavailable.
+    """
+    next_opex = next_monthly_opex(today_date)
+    next_witching = next_triple_witching(today_date)
+    if not next_opex or not next_witching:
+        return None
+    is_today_opex = next_opex == today_date
+    is_today_witching = next_witching == today_date
+    opex_part = (
+        "IS a monthly options expiration Friday" if is_today_opex
+        else f"is not an expiration Friday (next monthly op-ex: {next_opex.isoformat()})"
+    )
+    witching_part = (
+        "also IS quarterly triple witching (stock index futures, index options, and equity options all expire together)"
+        if is_today_witching
+        else f"next quarterly triple witching: {next_witching.isoformat()}"
+    )
+    return f"Today ({today_date.isoformat()}) {opex_part}; {witching_part}."
+
+
 def years_to_expiry(expiry_date_str, now_et):
     """Time to expiry in years, measured to 4:00pm ET on the expiry
     date, floored at MIN_T_SECONDS so it never hits zero/negative."""
@@ -566,6 +634,22 @@ stale. If no GEX levels are provided, or none genuinely line up with a
 level you already found, don't mention GEX at all - never invent or
 force a GEX connection to a level found from price alone.
 
+You will also always receive an options expiration context line stating
+where today sits relative to the next monthly options expiration (third
+Friday of the month) and next quarterly triple witching (third Friday of
+March/June/September/December, when stock index futures, index options,
+and equity options all expire together) - purely a calendar fact, not
+GEX or dealer-positioning data. Mention this only when it's genuinely
+close enough to matter for the Daily section: today itself is one of
+these dates, or one falls within roughly the next 3-5 trading days from
+the most recent daily bar. In that case, one sentence is enough - note
+which one it is and that expiration-driven flows (pinning into the close
+beforehand, a possible volatility pickup right after as dealer hedges
+roll off) could account for some of the price behavior you're already
+describing. If the next occurrence is weeks away, don't mention it at
+all - this is a brief situational note, never its own section or a
+mandatory part of every response.
+
 Structure the response as: a one-line bolded "Summary:" with a single
 sentence capturing the whole picture, then bolded section headers in
 this order - "Monthly:" (only when monthly data was provided), then
@@ -764,6 +848,10 @@ def handle_chart_analysis(quote_client, symbol):
         )
     if gex_note:
         user_content += f"\n\nOptional GEX reference (dealer positioning, not price action):\n{gex_note}"
+
+    opex_note = opex_context_note(today_et)
+    if opex_note:
+        user_content += f"\n\nOptions expiration context (calendar fact): {opex_note}"
 
     payload = json.dumps({
         "model": "claude-sonnet-4-6",
