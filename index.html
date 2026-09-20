@@ -268,6 +268,7 @@
 
 <div class="controls" style="margin-top:12px;">
   <button id="ctRunBtn" disabled>Run Protocol Coffee and Tea</button>
+  <button id="ctFullSessionBtn" disabled title="Runs Generate GEX analysis and Protocol Coffee and Tea back to back, using the currently loaded GEX data">Generate GEX analysis + Coffee and Tea</button>
   <button id="ctPdfBtn" disabled>Download session PDF</button>
   <button id="ctRefreshMacroBtn" type="button" title="Force a fresh macro calendar search for this month, bypassing the cache">Refresh macro calendar</button>
 </div>
@@ -2951,6 +2952,7 @@ flowMonthlyPdfBtn.addEventListener('click', downloadMonthlyFlowPdf);
 const ctPortfolioSize = document.getElementById('ctPortfolioSize');
 const ctAssumedIv = document.getElementById('ctAssumedIv');
 const ctRunBtn = document.getElementById('ctRunBtn');
+const ctFullSessionBtn = document.getElementById('ctFullSessionBtn');
 const ctRefreshMacroBtn = document.getElementById('ctRefreshMacroBtn');
 const ctPdfBtn = document.getElementById('ctPdfBtn');
 const ctStatusEl = document.getElementById('ctStatus');
@@ -3031,6 +3033,7 @@ function buildFlowDataFromCurrent(stats) {
 
 function updateCtButtonState() {
   ctRunBtn.disabled = !currentData;
+  ctFullSessionBtn.disabled = !currentData;
 }
 
 // Raw call to the web search-backed endpoint - not called directly per
@@ -3193,6 +3196,28 @@ async function runCoffeeAndTea() {
     ctRunBtn.disabled = false;
   }
 }
+
+// Combines "Generate GEX analysis" (the standalone structure read in the
+// GEX section) with Coffee and Tea in one click, both run against
+// whatever GEX data is currently loaded (a Tiger pull or a manual
+// screenshot upload). Each step still manages its own status line,
+// button state, and error handling exactly as it does standalone - this
+// just calls them back to back and disables itself meanwhile, so a
+// failure in the first step (e.g. the analysis endpoint erroring) stops
+// here rather than silently continuing into Coffee and Tea with no GEX
+// analysis to show for it.
+async function runFullGexSession() {
+  if (!currentData) return;
+  ctFullSessionBtn.disabled = true;
+  try {
+    await generateStandaloneGexAnalysis();
+    if (!currentAnalysis) return; // the analysis step itself already reported the error
+    await runCoffeeAndTea();
+  } finally {
+    ctFullSessionBtn.disabled = false;
+  }
+}
+ctFullSessionBtn.addEventListener('click', runFullGexSession);
 
 function ctSection(title, contentHtml) {
   return `<div style="margin-top:16px;">
