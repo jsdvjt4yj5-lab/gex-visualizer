@@ -1305,9 +1305,12 @@ async function downloadChartAnalysisPdf() {
 
     // Each timeframe's own text directly followed by its own chart image -
     // matching the on-page layout - instead of all text up top and all
-    // charts stacked at the end. Only sections a chart actually rendered
-    // for are included (the canvas has real pixel dimensions), so a
-    // failed/partial fetch doesn't produce a blank chart under real text.
+    // charts stacked at the end. Gate on this run's actual timeframes
+    // data (tf[key]), not just the canvas's pixel dimensions - a canvas
+    // keeps its last-rendered width/height even after being hidden (e.g.
+    // Monthly outside the last week of the month), so checking only
+    // canvas.width/height would print a stale/blank chart under a bare
+    // header on runs where that timeframe wasn't actually included.
     const timeframeSections = [
       { key: 'monthly', canvasId: 'chartAnalysisMonthlyChart', label: 'Monthly' },
       { key: 'weekly', canvasId: 'chartAnalysisWeeklyChart', label: 'Weekly' },
@@ -1316,8 +1319,9 @@ async function downloadChartAnalysisPdf() {
 
     timeframeSections.forEach(({ key, canvasId, label }) => {
       const canvas = document.getElementById(canvasId);
-      const hasChart = canvas && canvas.width > 0 && canvas.height > 0;
-      const text = sections[key];
+      const includedThisRun = !!tf[key]?.bars?.length;
+      const hasChart = includedThisRun && canvas && canvas.width > 0 && canvas.height > 0;
+      const text = includedThisRun ? sections[key] : null;
       if (!hasChart && !text) return;
 
       if (y > margin + 40 && y + 60 > pageHeight - margin) {
