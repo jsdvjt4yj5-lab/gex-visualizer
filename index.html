@@ -981,10 +981,23 @@ async function generateChartAnalysis() {
     }
     chartAnalysisOutput.textContent = data.analysis;
     chartAnalysisOutput.style.display = 'block';
-    chartAnalysisStatus.textContent = `${data.bars_used} daily bars used (${data.date_range?.[0]} to ${data.date_range?.[1]}).`;
+    const tf = data.timeframes || {};
+    const tfSummary = ['daily', 'weekly', 'monthly']
+      .map((k) => tf[k] ? `${tf[k].bars_used} ${k}` : null)
+      .filter(Boolean)
+      .join(' · ');
+    const gexNote = data.gex_reference?.session_date
+      ? ` GEX reference: ${data.gex_reference.session_date}.`
+      : '';
+    chartAnalysisStatus.textContent = (tfSummary
+      ? `${tfSummary} bars used.`
+      : `${data.bars_used} daily bars used (${data.date_range?.[0]} to ${data.date_range?.[1]}).`)
+      + gexNote;
     currentChartAnalysis = {
       ticker,
       analysis: data.analysis,
+      timeframes: data.timeframes,
+      gexReference: data.gex_reference,
       bars_used: data.bars_used,
       date_range: data.date_range,
     };
@@ -1017,11 +1030,32 @@ async function downloadChartAnalysisPdf() {
     doc.setFontSize(10);
     doc.setFont(undefined, 'normal');
     doc.setTextColor(100);
-    const [from, to] = currentChartAnalysis.date_range || [];
-    const meta = `${currentChartAnalysis.bars_used} daily bars` +
-      (from && to ? ` · ${from} to ${to}` : '');
-    doc.text(meta, margin, y);
-    y += 24;
+    const tf = currentChartAnalysis.timeframes || {};
+    const tfLines = ['monthly', 'weekly', 'daily']
+      .map((k) => {
+        const t = tf[k];
+        if (!t) return null;
+        const [from, to] = t.date_range || [];
+        return `${t.bars_used} ${k} bars` + (from && to ? ` (${from} to ${to})` : '');
+      })
+      .filter(Boolean);
+    if (tfLines.length) {
+      tfLines.forEach((line) => {
+        doc.text(line, margin, y);
+        y += 13;
+      });
+      if (currentChartAnalysis.gexReference?.session_date) {
+        doc.text(`GEX reference: ${currentChartAnalysis.gexReference.session_date}`, margin, y);
+        y += 13;
+      }
+      y += 8;
+    } else {
+      const [from, to] = currentChartAnalysis.date_range || [];
+      const meta = `${currentChartAnalysis.bars_used} daily bars` +
+        (from && to ? ` · ${from} to ${to}` : '');
+      doc.text(meta, margin, y);
+      y += 24;
+    }
     doc.setTextColor(0);
 
     doc.setFontSize(12);

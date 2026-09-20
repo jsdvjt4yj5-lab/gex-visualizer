@@ -246,6 +246,48 @@ def fetch_prior_snapshot_from_d1(ticker, before_date):
         return None
 
 
+def fetch_latest_snapshot_from_d1(ticker):
+    """Best-effort read of the single most recent GEX snapshot for this
+    ticker, regardless of date - used to pull notable GEX levels into
+    Chart Analysis as optional reference context (see handle_chart_
+    analysis below). Unlike fetch_prior_snapshot_from_d1, this isn't
+    bounded to "before some date" - it just wants whatever the latest
+    stored read is. Returns None on any failure (missing env vars,
+    network error, nothing stored yet) since this is a nice-to-have -
+    the price-action read must never block or fail on it.
+    """
+    import urllib.request
+    import urllib.error
+
+    account_id = (os.environ.get("CLOUDFLARE_ACCOUNT_ID") or "").strip()
+    database_id = (os.environ.get("CLOUDFLARE_D1_DATABASE_ID") or "").strip()
+    api_token = (os.environ.get("CLOUDFLARE_API_TOKEN") or "").strip()
+    if not all([account_id, database_id, api_token]):
+        return None
+
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/d1/database/{database_id}/query"
+    payload = json.dumps({
+        "sql": "SELECT session_date, gex_data_json FROM gex_snapshots WHERE ticker = ? ORDER BY session_date DESC LIMIT 1",
+        "params": [ticker],
+    }).encode()
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            result = json.loads(resp.read().decode())
+        rows = result.get("result", [{}])[0].get("results", [])
+        if not rows:
+            return None
+        snapshot = json.loads(rows[0]["gex_data_json"])
+        snapshot["session_date"] = rows[0]["session_date"]
+        return snapshot
+    except Exception:
+        return None
+
+
 def years_to_expiry(expiry_date_str, now_et):
     """Time to expiry in years, measured to 4:00pm ET on the expiry
     date, floored at MIN_T_SECONDS so it never hits zero/negative."""
@@ -452,73 +494,157 @@ def handle_price_data_volume_profile(quote_client, symbol, days):
 
 
 CHART_ANALYSIS_SYSTEM_PROMPT = """You are a concise technical analyst. You
-receive an array of daily closing prices and volumes for a single ticker,
-ordered oldest to newest, with no options/gamma data at all - this is a
-pure price-action read, deliberately separate from any GEX-based analysis.
-You also receive the ticker's 30-day and 200-day simple moving averages
-(the 200-day may be unavailable if there isn't enough history yet).
+receive THREE arrays of closing prices and volumes for a single ticker -
+DAILY, WEEKLY, and MONTHLY bars, each ordered oldest to newest - with no
+options/gamma data at all: this is a pure price-action read, deliberately
+separate from any GEX-based analysis. You also receive each timeframe's
+own simple moving averages: 30-day and 200-day for daily, 10-week and
+40-week for weekly, 12-month for monthly. Any of these may be marked
+unavailable if there isn't enough history yet for that particular bar
+count - work with whatever is available rather than fabricating a
+missing MA.
 
-Produce a short written technical read covering:
+For EACH of the three timeframes, cover:
 - The overall trend over the period shown (uptrend, downtrend, range-bound,
   or a recent shift from one to another - name roughly when a shift
   happened if one did)
 - Approximate support and resistance levels implied by where price has
-  repeatedly reversed or stalled in this data
+  repeatedly reversed or stalled in that timeframe's data
 - Any notable pattern in the closes (e.g. higher highs/higher lows,
   a clear range, a breakout or breakdown from a prior range)
 - How current price sits relative to recent levels (near a prior high/low,
   mid-range, etc.)
-- Where price sits relative to the 30-day and 200-day moving averages
-  (above/below/crossing), and whether either MA is close to (roughly
-  within 1% of) a support/resistance level you already identified from
-  price action alone - call out that confluence explicitly if it's
-  genuinely there (a technical level AND a moving average reinforcing
-  each other is a stronger signal than either alone). Only mention
-  confluence that's real - don't force a connection between unrelated
-  levels. If the 200-day MA isn't available, just work with the 30-day
-  and say so briefly rather than fabricating a 200-day read.
+- Where price sits relative to that timeframe's moving average(s)
+  (above/below/crossing), and whether an MA is close to (roughly within
+  1% of) a support/resistance level you already identified from price
+  action alone - call out that confluence explicitly if it's genuinely
+  there. Only mention confluence that's real - don't force a connection
+  between unrelated levels. If an MA isn't available, just work with
+  what is and say so briefly rather than fabricating a read.
+- If that timeframe's data shows a sideways range (not a clean trend),
+  assess whether it reads more like **accumulation** or **distribution**
+  using volume behavior within the range: accumulation shows volume
+  spiking on down-bars inside the range (selling being absorbed) with
+  higher lows forming as the range matures, often with a false breakdown
+  below range support that gets reclaimed; distribution shows volume
+  spiking on up-bars inside the range (supply being sold into strength)
+  with lower highs forming, often with a false breakout above range
+  resistance that fails. Only call this out when the range and volume
+  pattern genuinely support one reading over the other - if the range is
+  too short, the volume signal is mixed, or price is simply trending,
+  say the range doesn't yet show a clear accumulation/distribution
+  signature rather than forcing a call.
 
-Use **double asterisks** around the 2-4 word labels you want emphasized
-(e.g. a level name or the trend call) - do not overuse this, a few per
-response is enough. Start with a one-line "Summary:" (bolded) followed by
-a single sentence capturing the whole read. Then 2-3 short paragraphs of
-detail. Plain prose, no bullet points, no other headers.
+You may also receive an optional list of notable GEX (gamma exposure)
+levels from the most recent stored options-based snapshot for this
+ticker - strikes with their net GEX in millions and whether each sits in
+a gamma flip zone, plus the session date that snapshot was captured on.
+This is dealer options-positioning data, not price action, and Chart
+Analysis stays a pure price-action read - never summarize the GEX data
+on its own or explain dealer hedging mechanics. Its only use here is
+confluence: if a support/resistance level you already identified from
+price action alone (in the Daily section, since a single-expiration GEX
+snapshot is a near-term read and rarely still relevant at weekly/monthly
+horizons) sits close to (roughly within 0.5-1%) a notable GEX strike,
+call that out explicitly as reinforced by GEX positioning at that
+strike - a price-based level and dealer positioning agreeing is a
+stronger signal than either alone. If the snapshot's session date is
+more than a few days old, mention briefly that the GEX reference may be
+stale. If no GEX levels are provided, or none genuinely line up with a
+level you already found, don't mention GEX at all - never invent or
+force a GEX connection to a level found from price alone.
+
+Structure the response as: a one-line bolded "Summary:" with a single
+sentence capturing the whole multi-timeframe picture, then three bolded
+section headers in this order - "Monthly:", "Weekly:", "Daily:" (broadest
+context first, narrowest last) - each followed by 1-3 short paragraphs
+covering the points above for that timeframe. End with one final bolded
+header, "Multi-timeframe context:", with a short paragraph on whether the
+three timeframes agree or conflict (e.g. a bullish monthly/weekly
+backdrop with a daily pullback reads very differently from daily strength
+fighting a weekly downtrend) - only draw out real tension or alignment;
+if the timeframes simply agree, say so briefly rather than manufacturing
+a conflict that isn't there.
+
+Use **double asterisks** for section headers and for the occasional 2-4
+word label you want emphasized inside a paragraph (a level name, a trend
+call) - do not overuse this beyond headers and a few labels. Plain prose
+paragraphs under each header, no bullet points.
 
 This is not financial advice. Describe structure and price history only -
 never phrase anything as a directive to buy, sell, or take a specific
 action, and never name a specific trade, strike, or options strategy."""
 
 
-def handle_chart_analysis(quote_client, symbol):
-    # Single fetch of 210 calendar days of daily bars, reused for both the
-    # MA30/MA200 calc and the price-action payload below - avoids hitting
-    # Tiger's kline quota twice for one "Generate chart analysis" click
-    # (quota reset cadence is still unconfirmed, so minimizing calls
-    # matters here). 210 = 200 needed for the long MA + a small buffer,
-    # same margin handle_price_data_ma() already uses.
-    bars = fetch_tiger_bars(quote_client, symbol, period="day", limit=210)
-    if len(bars) < 30:
-        return {"error": "Not enough daily bars to write a chart analysis"}, 422
-
-    closes = [b["close"] for b in bars]
-    ma30 = sma(closes, 30)
-    ma200 = sma(closes, 200)
-    ma200_available = len(closes) >= 200
-
-    # Trim the price-action payload sent to the model down to the most
-    # recent ~90 days - plenty for a trend/support-resistance read without
-    # bloating the prompt with the full 210-day MA lookback window.
-    display_bars = bars[-90:]
-    condensed = [
+def _condense_bars(bars, n):
+    """Trims to the most recent n bars and reshapes to {date, close, volume}
+    dicts for the model payload - shared by all three timeframes below."""
+    trimmed = bars[-n:]
+    return [
         {
             "date": datetime.fromtimestamp(b["time_ms"] / 1000, tz=timezone.utc)
                 .astimezone(EASTERN).date().isoformat(),
             "close": round(b["close"], 2),
             "volume": b["volume"],
         }
-        for b in display_bars
+        for b in trimmed
     ]
-    date_range = [condensed[0]["date"], condensed[-1]["date"]]
+
+
+def handle_chart_analysis(quote_client, symbol):
+    # Three Tiger kline calls per click now (day/week/month) instead of
+    # one - each period is a separate get_bars() call, and they're
+    # believed to share the same "kline" quota bucket Tiger reported as
+    # remain: 20 (reset cadence still unconfirmed - see handover notes).
+    # So a single "Generate chart analysis" click now costs 3 quota
+    # units, not 1. Worth watching if this feature gets used often.
+    daily_bars = fetch_tiger_bars(quote_client, symbol, period="day", limit=210)
+    if len(daily_bars) < 30:
+        return {"error": "Not enough daily bars to write a chart analysis"}, 422
+
+    # Weekly: 110 bars (~2 years) comfortably covers a 40-week MA with a
+    # buffer. Monthly: 40 bars (~3+ years) comfortably covers a 12-month
+    # MA. Both are far shorter series than daily by nature of the
+    # timeframe, so there's no equivalent 200-bar target to hit.
+    weekly_bars = fetch_tiger_bars(quote_client, symbol, period="week", limit=110)
+    monthly_bars = fetch_tiger_bars(quote_client, symbol, period="month", limit=40)
+
+    daily_closes = [b["close"] for b in daily_bars]
+    weekly_closes = [b["close"] for b in weekly_bars]
+    monthly_closes = [b["close"] for b in monthly_bars]
+
+    daily_ma30 = sma(daily_closes, 30)
+    daily_ma200 = sma(daily_closes, 200)
+    daily_ma200_available = len(daily_closes) >= 200
+
+    weekly_ma10 = sma(weekly_closes, 10)
+    weekly_ma40 = sma(weekly_closes, 40)
+    weekly_ma40_available = len(weekly_closes) >= 40
+
+    monthly_ma12 = sma(monthly_closes, 12)
+    monthly_ma12_available = len(monthly_closes) >= 12
+
+    # Trim the price-action payload sent to the model per timeframe -
+    # enough bars for a trend/support-resistance read without bloating
+    # the prompt with the full MA lookback window on each one.
+    daily_condensed = _condense_bars(daily_bars, 90)
+    weekly_condensed = _condense_bars(weekly_bars, 52)
+    monthly_condensed = _condense_bars(monthly_bars, 24)
+
+    timeframes_meta = {
+        "daily": {
+            "bars_used": len(daily_condensed),
+            "date_range": [daily_condensed[0]["date"], daily_condensed[-1]["date"]],
+        },
+        "weekly": {
+            "bars_used": len(weekly_condensed),
+            "date_range": [weekly_condensed[0]["date"], weekly_condensed[-1]["date"]],
+        } if weekly_condensed else None,
+        "monthly": {
+            "bars_used": len(monthly_condensed),
+            "date_range": [monthly_condensed[0]["date"], monthly_condensed[-1]["date"]],
+        } if monthly_condensed else None,
+    }
 
     anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not anthropic_api_key:
@@ -527,19 +653,58 @@ def handle_chart_analysis(quote_client, symbol):
     import urllib.request
     import urllib.error
 
-    ma_note = f"30-day MA: {ma30}"
-    ma_note += f", 200-day MA: {ma200}" if ma200_available else ", 200-day MA: not enough history yet"
+    daily_ma_note = f"30-day MA: {daily_ma30}"
+    daily_ma_note += f", 200-day MA: {daily_ma200}" if daily_ma200_available else ", 200-day MA: not enough history yet"
+
+    weekly_ma_note = f"10-week MA: {weekly_ma10}"
+    weekly_ma_note += f", 40-week MA: {weekly_ma40}" if weekly_ma40_available else ", 40-week MA: not enough history yet"
+
+    monthly_ma_note = (
+        f"12-month MA: {monthly_ma12}" if monthly_ma12_available
+        else "12-month MA: not enough history yet"
+    )
+
+    # Optional GEX confluence context - pulls the most recent stored GEX
+    # snapshot for this ticker (if any) and surfaces its most notable
+    # strikes to the model as reference only. This stays a nice-to-have:
+    # a missing/failed D1 read here must never block the price-action
+    # read, and the prompt tells the model to only use this for
+    # confluence, not as its own analysis.
+    gex_snapshot = fetch_latest_snapshot_from_d1(symbol)
+    notable_gex_levels = []
+    gex_note = None
+    if gex_snapshot and gex_snapshot.get("levels"):
+        ranked = sorted(
+            gex_snapshot["levels"],
+            key=lambda l: abs(l.get("net_gex_millions", 0)),
+            reverse=True,
+        )
+        notable_gex_levels = sorted(ranked[:10], key=lambda l: l["strike"])
+        gex_note = (
+            f"Session {gex_snapshot.get('session_date', 'unknown date')}, "
+            f"spot at capture {gex_snapshot.get('spot_price', 'n/a')}: "
+            + ", ".join(
+                f"{l['strike']} ({l['net_gex_millions']:+.1f}M"
+                + (", flip zone" if l.get("is_flip_zone") else "")
+                + ")"
+                for l in notable_gex_levels
+            )
+        )
+
+    user_content = (
+        f"Write the multi-timeframe technical read for {symbol}.\n\n"
+        f"DAILY bars ({len(daily_condensed)}, {daily_ma_note}):\n{json.dumps(daily_condensed)}\n\n"
+        f"WEEKLY bars ({len(weekly_condensed)}, {weekly_ma_note}):\n{json.dumps(weekly_condensed)}\n\n"
+        f"MONTHLY bars ({len(monthly_condensed)}, {monthly_ma_note}):\n{json.dumps(monthly_condensed)}"
+    )
+    if gex_note:
+        user_content += f"\n\nOptional GEX reference (dealer positioning, not price action):\n{gex_note}"
 
     payload = json.dumps({
         "model": "claude-sonnet-4-6",
-        "max_tokens": 600,
+        "max_tokens": 1800,
         "system": CHART_ANALYSIS_SYSTEM_PROMPT,
-        "messages": [{
-            "role": "user",
-            "content": f"Write the technical read for {symbol} from these "
-                       f"{len(condensed)} daily bars:\n\n{json.dumps(condensed)}"
-                       f"\n\nMoving averages ({ma_note}):",
-        }],
+        "messages": [{"role": "user", "content": user_content}],
     }).encode()
 
     req = urllib.request.Request(
@@ -553,7 +718,7 @@ def handle_chart_analysis(quote_client, symbol):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=45) as resp:
             result = json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         return {"error": "Anthropic API error", "detail": e.read().decode(errors="replace")}, 502
@@ -567,11 +732,18 @@ def handle_chart_analysis(quote_client, symbol):
     return {
         "symbol": symbol,
         "analysis": text_block["text"].strip(),
-        "bars_used": len(condensed),
-        "date_range": date_range,
-        "ma30": ma30,
-        "ma200": ma200,
-        "ma200_available": ma200_available,
+        "timeframes": timeframes_meta,
+        "gex_reference": {
+            "session_date": gex_snapshot.get("session_date"),
+            "levels": notable_gex_levels,
+        } if gex_snapshot else None,
+        # Kept at top level too (daily values) for any caller still
+        # reading the pre-multi-timeframe response shape.
+        "bars_used": timeframes_meta["daily"]["bars_used"],
+        "date_range": timeframes_meta["daily"]["date_range"],
+        "ma30": daily_ma30,
+        "ma200": daily_ma200,
+        "ma200_available": daily_ma200_available,
         "source": "tiger",
     }, 200
 
