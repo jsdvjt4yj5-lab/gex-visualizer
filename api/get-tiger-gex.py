@@ -745,14 +745,20 @@ def fetch_sector_performance_alphavantage():
     instead of fetching each sector ETF individually via Tiger. Runs on
     its own key/quota (ALPHAVANTAGE_API_KEY env var; free tier is 25
     requests/day, 5/min as of this writing) - entirely separate from and
-    doesn't touch the Tiger kline quota at all. Returns None on any
-    failure (missing key, network error, rate-limited, unexpected
-    response shape) - this is a nice-to-have, never something Chart
-    Analysis should block or fail on.
+    doesn't touch the Tiger kline quota at all.
+
+    Returns (data, debug): data is None on any failure (missing key,
+    network error, rate-limited, unexpected response shape) since this
+    is a nice-to-have Chart Analysis should never block or fail on - but
+    debug always describes what actually happened (which of those it
+    was, an HTTP status, an Alpha Vantage error/rate-limit message
+    verbatim, or the keys an unexpected response shape actually had), so
+    a failure is diagnosable via the API response's sector_context_debug
+    field instead of silently vanishing the way it used to.
     """
     api_key = (os.environ.get("ALPHAVANTAGE_API_KEY") or "").strip()
     if not api_key:
-        return None
+        return None, {"status": "no_api_key"}
 
     import urllib.request
     import urllib.error
@@ -761,9 +767,33 @@ def fetch_sector_performance_alphavantage():
     req = urllib.request.Request(url, headers={"User-Agent": "gex-visualizer"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
+            raw = resp.read().decode()
+    except urllib.error.HTTPError as e:
+        return None, {
+            "status": "http_error",
+            "code": e.code,
+            "detail": e.read().decode(errors="replace")[:300],
+        }
+    except urllib.error.URLError as e:
+        return None, {"status": "network_error", "detail": str(e.reason)}
+    except Exception as e:
+        return None, {"status": "request_failed", "detail": str(e)}
+
+    try:
+        data = json.loads(raw)
     except Exception:
-        return None
+        return None, {"status": "invalid_json", "raw_preview": raw[:300]}
+
+    # Alpha Vantage returns HTTP 200 even for a bad key, a rate-limit, or
+    # an unrecognized function - it just swaps the "Rank ..." sections
+    # for an "Information", "Note", or "Error Message" field instead.
+    # Surface that verbatim rather than falling through to the generic
+    # "unexpected shape" case below, since the message itself usually
+    # says exactly what's wrong (e.g. an invalid key, or the free-tier
+    # 25/day cap being hit).
+    for error_field in ("Error Message", "Note", "Information"):
+        if error_field in data:
+            return None, {"status": "api_error_response", "field": error_field, "detail": str(data[error_field])[:300]}
 
     # Alpha Vantage labels each window "Rank <letter>: <window> Performance"
     # (e.g. "Rank B: 1 Day Performance") - matched by substring rather than
@@ -781,7 +811,7 @@ def fetch_sector_performance_alphavantage():
         "one_year_pct": find_window("1 Year"),
     }
     if not any(windows.values()):
-        return None  # unexpected shape - e.g. a rate-limit "Note" instead of real data
+        return None, {"status": "unexpected_shape", "keys_found": list(data.keys())[:10]}
 
     def parse_pct(s):
         try:
@@ -790,7 +820,7 @@ def fetch_sector_performance_alphavantage():
             return None
 
     all_sectors = sorted({sector for w in windows.values() if w for sector in w.keys()})
-    return [
+    result = [
         {
             "sector": sector,
             **{
@@ -800,6 +830,7 @@ def fetch_sector_performance_alphavantage():
         }
         for sector in all_sectors
     ]
+    return result, {"status": "ok", "sector_count": len(result)}
 
 
 def _condense_bars(bars, n):
@@ -984,7 +1015,9 @@ def handle_chart_analysis(quote_client, symbol):
 
     # SPY only - broad-market sector breadth isn't meaningful context for
     # an arbitrary single ticker the way it is for the index itself.
-    sector_data = fetch_sector_performance_alphavantage() if symbol.upper() == "SPY" else None
+    sector_data, sector_debug = (
+        fetch_sector_performance_alphavantage() if symbol.upper() == "SPY" else (None, None)
+    )
     sector_note = None
     if sector_data:
         ranked = sorted(
@@ -1047,6 +1080,7 @@ def handle_chart_analysis(quote_client, symbol):
         "timeframes": timeframes_meta,
         "monthly_included": is_last_week_of_month,
         "sector_context": sector_data or None,
+        "sector_context_debug": sector_debug,
         "gex_reference": {
             "session_date": gex_snapshot.get("session_date"),
             "levels": notable_gex_levels,
