@@ -371,6 +371,20 @@
 </div>
 <div class="status" id="chartAnalysisStatus"></div>
 <div id="chartAnalysisOutput" style="margin-top:12px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd; display:none;"></div>
+<div id="chartAnalysisChartsWrap" style="display:none; margin-top:16px;">
+  <div id="chartAnalysisMonthlyLabel" style="font-size:12px; color:#888; margin-bottom:4px;">Monthly</div>
+  <div id="chartAnalysisMonthlyChartWrap" style="position:relative; height:0;">
+    <canvas id="chartAnalysisMonthlyChart"></canvas>
+  </div>
+  <div style="font-size:12px; color:#888; margin:16px 0 4px;">Weekly</div>
+  <div id="chartAnalysisWeeklyChartWrap" style="position:relative; height:0;">
+    <canvas id="chartAnalysisWeeklyChart"></canvas>
+  </div>
+  <div style="font-size:12px; color:#888; margin:16px 0 4px;">Daily</div>
+  <div id="chartAnalysisDailyChartWrap" style="position:relative; height:0;">
+    <canvas id="chartAnalysisDailyChart"></canvas>
+  </div>
+</div>
 <button id="chartAnalysisPdfBtn" style="margin-top:12px;">Download PDF</button>
 </div>
 
@@ -634,6 +648,9 @@ let currentAnalysis = null;
 let currentWeekly = null;
 let currentMonthly = null;
 let vpChartInstance = null;
+let chartAnalysisMonthlyChartInstance = null;
+let chartAnalysisWeeklyChartInstance = null;
+let chartAnalysisDailyChartInstance = null;
 
 function showMaInfo(ma) {
   if (!ma || (ma.ma30 == null && ma.ma200 == null)) {
@@ -878,6 +895,7 @@ const SECTION_CHART_INSTANCES = {
   'section-gex': () => [chartInstance, vpChartInstance, analysisChartInstance],
   'section-flow': () => [flowChartInstance],
   'section-logs': () => [weeklyChartInstance, monthlyChartInstance, flowWeeklyChartInstance, flowMonthlyChartInstance],
+  'section-chartanalysis': () => [chartAnalysisMonthlyChartInstance, chartAnalysisWeeklyChartInstance, chartAnalysisDailyChartInstance],
 };
 
 function resizeChartsIn(sectionId) {
@@ -916,8 +934,117 @@ const chartAnalysisTickerInput = document.getElementById('chartAnalysisTickerInp
 const chartAnalysisBtn = document.getElementById('chartAnalysisBtn');
 const chartAnalysisStatus = document.getElementById('chartAnalysisStatus');
 const chartAnalysisOutput = document.getElementById('chartAnalysisOutput');
+const chartAnalysisChartsWrap = document.getElementById('chartAnalysisChartsWrap');
+const chartAnalysisMonthlyLabel = document.getElementById('chartAnalysisMonthlyLabel');
+const chartAnalysisMonthlyChartWrap = document.getElementById('chartAnalysisMonthlyChartWrap');
+const chartAnalysisWeeklyChartWrap = document.getElementById('chartAnalysisWeeklyChartWrap');
+const chartAnalysisDailyChartWrap = document.getElementById('chartAnalysisDailyChartWrap');
 const chartAnalysisPdfBtn = document.getElementById('chartAnalysisPdfBtn');
 let currentChartAnalysis = null;
+
+// Renders one timeframe's close-price line plus flat reference lines for
+// its moving average(s) and (daily only) any notable GEX strikes that
+// fall within the visible price range. MAs/GEX levels are single point-
+// in-time values, not a rolling series, so a flat dashed line across the
+// chart's x-range is the honest representation - not a computed rolling
+// line the data doesn't actually support.
+function renderChartAnalysisTimeframeChart(wrap, canvasId, existingInstance, tfData, refLines, label) {
+  wrap.style.height = '240px';
+  if (existingInstance) existingInstance.destroy();
+
+  const labels = tfData.bars.map((b) => b.date);
+  const closeData = tfData.bars.map((b) => b.close);
+
+  const datasets = [
+    { label: 'Close', data: closeData, borderColor: '#3b82f6', backgroundColor: 'transparent', tension: 0.1, pointRadius: 0, borderWidth: 1.5 },
+  ];
+  refLines.forEach((ref) => {
+    if (ref.value == null) return;
+    datasets.push({
+      label: ref.label,
+      data: labels.map(() => ref.value),
+      borderColor: ref.color,
+      backgroundColor: 'transparent',
+      borderDash: [4, 4],
+      pointRadius: 0,
+      borderWidth: 1,
+    });
+  });
+
+  return new Chart(document.getElementById(canvasId), {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: true, labels: { color: '#999', font: { size: 10 } } },
+        title: {
+          display: true,
+          text: `${label} · ${tfData.date_range?.[0]} to ${tfData.date_range?.[1]}`,
+          color: '#ccc',
+          font: { size: 12, weight: 'normal' },
+        },
+      },
+      scales: {
+        y: { grid: { color: 'rgba(150,150,150,0.15)' }, ticks: { color: '#999' } },
+        x: { grid: { display: false }, ticks: { color: '#999', maxTicksLimit: 8 } },
+      },
+    },
+  });
+}
+
+function renderChartAnalysisCharts(tf) {
+  const gexRefLines = (tf.daily?.gex_levels || []).map((l) => ({
+    label: `GEX ${l.strike}${l.is_flip_zone ? ' (flip)' : ''}`,
+    value: l.strike,
+    color: l.is_flip_zone ? '#eda100' : (l.net_gex_millions >= 0 ? '#4ade80' : '#f87171'),
+  }));
+
+  if (tf.monthly?.bars?.length) {
+    chartAnalysisMonthlyLabel.style.display = '';
+    chartAnalysisMonthlyChartWrap.style.display = '';
+    chartAnalysisMonthlyChartInstance = renderChartAnalysisTimeframeChart(
+      chartAnalysisMonthlyChartWrap, 'chartAnalysisMonthlyChart', chartAnalysisMonthlyChartInstance,
+      tf.monthly, [{ label: '12-mo MA', value: tf.monthly.ma12, color: '#eda100' }], 'Monthly'
+    );
+  } else {
+    // Not the last week of the month - monthly wasn't re-fetched this
+    // call. Hide the section rather than leaving a stale chart from an
+    // earlier "last week of month" run sitting there unlabeled.
+    if (chartAnalysisMonthlyChartInstance) {
+      chartAnalysisMonthlyChartInstance.destroy();
+      chartAnalysisMonthlyChartInstance = null;
+    }
+    chartAnalysisMonthlyLabel.style.display = 'none';
+    chartAnalysisMonthlyChartWrap.style.display = 'none';
+  }
+  if (tf.weekly?.bars?.length) {
+    chartAnalysisWeeklyChartInstance = renderChartAnalysisTimeframeChart(
+      chartAnalysisWeeklyChartWrap, 'chartAnalysisWeeklyChart', chartAnalysisWeeklyChartInstance,
+      tf.weekly,
+      [
+        { label: '10-wk MA', value: tf.weekly.ma10, color: '#eda100' },
+        { label: '40-wk MA', value: tf.weekly.ma40, color: '#e05252' },
+      ],
+      'Weekly'
+    );
+  }
+  if (tf.daily?.bars?.length) {
+    chartAnalysisDailyChartInstance = renderChartAnalysisTimeframeChart(
+      chartAnalysisDailyChartWrap, 'chartAnalysisDailyChart', chartAnalysisDailyChartInstance,
+      tf.daily,
+      [
+        { label: '30-day MA', value: tf.daily.ma30, color: '#eda100' },
+        { label: '200-day MA', value: tf.daily.ma200, color: '#e05252' },
+        ...gexRefLines,
+      ],
+      'Daily'
+    );
+  }
+  chartAnalysisChartsWrap.style.display =
+    (tf.daily?.bars?.length || tf.weekly?.bars?.length || tf.monthly?.bars?.length) ? 'block' : 'none';
+}
 
 // Renders **bold** markdown from the AI's response as real bold text
 // inside a jsPDF doc, word-wrapping (and paragraph-breaking on blank
@@ -982,6 +1109,7 @@ async function generateChartAnalysis() {
     chartAnalysisOutput.textContent = data.analysis;
     chartAnalysisOutput.style.display = 'block';
     const tf = data.timeframes || {};
+    renderChartAnalysisCharts(tf);
     const tfSummary = ['daily', 'weekly', 'monthly']
       .map((k) => tf[k] ? `${tf[k].bars_used} ${k}` : null)
       .filter(Boolean)
@@ -989,10 +1117,13 @@ async function generateChartAnalysis() {
     const gexNote = data.gex_reference?.session_date
       ? ` GEX reference: ${data.gex_reference.session_date}.`
       : '';
+    const monthlyNote = !data.monthly_included
+      ? ' Monthly skipped (only refreshed in the last week of each month).'
+      : '';
     chartAnalysisStatus.textContent = (tfSummary
       ? `${tfSummary} bars used.`
       : `${data.bars_used} daily bars used (${data.date_range?.[0]} to ${data.date_range?.[1]}).`)
-      + gexNote;
+      + gexNote + monthlyNote;
     currentChartAnalysis = {
       ticker,
       analysis: data.analysis,
@@ -1005,6 +1136,7 @@ async function generateChartAnalysis() {
     chartAnalysisStatus.textContent = 'Chart analysis failed: ' + err.message;
     chartAnalysisStatus.className = 'status error';
     currentChartAnalysis = null;
+    chartAnalysisChartsWrap.style.display = 'none';
   } finally {
     chartAnalysisBtn.disabled = false;
   }
@@ -1073,6 +1205,44 @@ async function downloadChartAnalysisPdf() {
       margin,
       doc.internal.pageSize.getHeight() - 24
     );
+
+    // Chart images (Monthly, Weekly, Daily), each on their own page if
+    // needed - only included when a chart actually rendered (the canvas
+    // has real pixel dimensions), so a failed/partial fetch doesn't
+    // produce blank chart pages.
+    const chartCanvases = [
+      { id: 'chartAnalysisMonthlyChart', label: 'Monthly' },
+      { id: 'chartAnalysisWeeklyChart', label: 'Weekly' },
+      { id: 'chartAnalysisDailyChart', label: 'Daily' },
+    ]
+      .map((c) => ({ ...c, canvas: document.getElementById(c.id) }))
+      .filter((c) => c.canvas && c.canvas.width > 0 && c.canvas.height > 0);
+
+    if (chartCanvases.length) {
+      doc.addPage();
+      let cy = margin;
+      doc.setTextColor(0);
+      doc.setFontSize(14);
+      doc.setFont(undefined, 'bold');
+      doc.text('Charts', margin, cy);
+      cy += 20;
+
+      const imgWidth = pageWidth - margin * 2;
+      chartCanvases.forEach(({ canvas, label }) => {
+        const imgHeight = (canvas.height / canvas.width) * imgWidth;
+        if (cy + imgHeight + 14 > doc.internal.pageSize.getHeight() - margin) {
+          doc.addPage();
+          cy = margin;
+        }
+        doc.setFontSize(11);
+        doc.setFont(undefined, 'bold');
+        doc.text(label, margin, cy);
+        cy += 14;
+        const imgData = canvas.toDataURL('image/png', 1.0);
+        doc.addImage(imgData, 'PNG', margin, cy, imgWidth, imgHeight);
+        cy += imgHeight + 24;
+      });
+    }
 
     doc.save(`${currentChartAnalysis.ticker}_Chart_Analysis.pdf`);
   } finally {

@@ -494,17 +494,29 @@ def handle_price_data_volume_profile(quote_client, symbol, days):
 
 
 CHART_ANALYSIS_SYSTEM_PROMPT = """You are a concise technical analyst. You
-receive THREE arrays of closing prices and volumes for a single ticker -
-DAILY, WEEKLY, and MONTHLY bars, each ordered oldest to newest - with no
-options/gamma data at all: this is a pure price-action read, deliberately
-separate from any GEX-based analysis. You also receive each timeframe's
-own simple moving averages: 30-day and 200-day for daily, 10-week and
+receive DAILY and WEEKLY arrays of closing prices and volumes for a
+single ticker, each ordered oldest to newest, and - only on some calls,
+see below - a MONTHLY array too. There is no options/gamma data at all:
+this is a pure price-action read, deliberately separate from any
+GEX-based analysis. You also receive each provided timeframe's own
+simple moving averages: 30-day and 200-day for daily, 10-week and
 40-week for weekly, 12-month for monthly. Any of these may be marked
 unavailable if there isn't enough history yet for that particular bar
 count - work with whatever is available rather than fabricating a
 missing MA.
 
-For EACH of the three timeframes, cover:
+The MONTHLY timeframe is only sent during the last week of each
+calendar month, since a monthly bar barely moves before it closes and
+re-analyzing it daily would just repeat the prior read. On calls where
+it's missing, you'll be told explicitly that it was left out by design -
+in that case write only the Weekly and Daily sections (skip the Monthly
+header and paragraph entirely) and have the Multi-timeframe context
+paragraph speak only to whether Weekly and Daily agree or conflict.
+Never apologize for or explain the missing monthly data, and never
+fabricate a monthly read from the daily/weekly bars alone - just proceed
+with what was actually provided.
+
+For EACH timeframe you were actually given data for, cover:
 - The overall trend over the period shown (uptrend, downtrend, range-bound,
   or a recent shift from one to another - name roughly when a shift
   happened if one did)
@@ -555,16 +567,17 @@ level you already found, don't mention GEX at all - never invent or
 force a GEX connection to a level found from price alone.
 
 Structure the response as: a one-line bolded "Summary:" with a single
-sentence capturing the whole multi-timeframe picture, then three bolded
-section headers in this order - "Monthly:", "Weekly:", "Daily:" (broadest
-context first, narrowest last) - each followed by 1-3 short paragraphs
-covering the points above for that timeframe. End with one final bolded
-header, "Multi-timeframe context:", with a short paragraph on whether the
-three timeframes agree or conflict (e.g. a bullish monthly/weekly
-backdrop with a daily pullback reads very differently from daily strength
-fighting a weekly downtrend) - only draw out real tension or alignment;
-if the timeframes simply agree, say so briefly rather than manufacturing
-a conflict that isn't there.
+sentence capturing the whole picture, then bolded section headers in
+this order - "Monthly:" (only when monthly data was provided), then
+"Weekly:", then "Daily:" (broadest context first, narrowest last) - each
+followed by 1-3 short paragraphs covering the points above for that
+timeframe. End with one final bolded header, "Multi-timeframe context:",
+with a short paragraph on whether the provided timeframes agree or
+conflict (e.g. a bullish monthly/weekly backdrop with a daily pullback
+reads very differently from daily strength fighting a weekly downtrend)
+- only draw out real tension or alignment; if the timeframes simply
+agree, say so briefly rather than manufacturing a conflict that isn't
+there.
 
 Use **double asterisks** for section headers and for the occasional 2-4
 word label you want emphasized inside a paragraph (a level name, a trend
@@ -597,17 +610,36 @@ def handle_chart_analysis(quote_client, symbol):
     # believed to share the same "kline" quota bucket Tiger reported as
     # remain: 20 (reset cadence still unconfirmed - see handover notes).
     # So a single "Generate chart analysis" click now costs 3 quota
-    # units, not 1. Worth watching if this feature gets used often.
+    # units, not 1 - except during most of the month, where it's 2 (see
+    # is_last_week_of_month below).
     daily_bars = fetch_tiger_bars(quote_client, symbol, period="day", limit=210)
     if len(daily_bars) < 30:
         return {"error": "Not enough daily bars to write a chart analysis"}, 422
 
     # Weekly: 110 bars (~2 years) comfortably covers a 40-week MA with a
-    # buffer. Monthly: 40 bars (~3+ years) comfortably covers a 12-month
-    # MA. Both are far shorter series than daily by nature of the
-    # timeframe, so there's no equivalent 200-bar target to hit.
+    # buffer.
     weekly_bars = fetch_tiger_bars(quote_client, symbol, period="week", limit=110)
-    monthly_bars = fetch_tiger_bars(quote_client, symbol, period="month", limit=40)
+
+    # Monthly context barely moves within a month - a monthly bar doesn't
+    # even close until month-end, so re-running it every day burns a
+    # Tiger kline call (and prompt space) for a read that's almost
+    # identical to yesterday's. Only fetch it during the last 7 calendar
+    # days of the month, when the current monthly bar is close to final
+    # and actually worth a fresh look; every other day Chart Analysis
+    # covers Daily + Weekly only.
+    today_et = datetime.now(timezone.utc).astimezone(EASTERN).date()
+    next_month_first = (
+        date(today_et.year + 1, 1, 1) if today_et.month == 12
+        else date(today_et.year, today_et.month + 1, 1)
+    )
+    days_in_month = (next_month_first - date(today_et.year, today_et.month, 1)).days
+    is_last_week_of_month = today_et.day > days_in_month - 7
+
+    # Monthly: 40 bars (~3+ years) comfortably covers a 12-month MA.
+    monthly_bars = (
+        fetch_tiger_bars(quote_client, symbol, period="month", limit=40)
+        if is_last_week_of_month else []
+    )
 
     daily_closes = [b["close"] for b in daily_bars]
     weekly_closes = [b["close"] for b in weekly_bars]
@@ -635,14 +667,25 @@ def handle_chart_analysis(quote_client, symbol):
         "daily": {
             "bars_used": len(daily_condensed),
             "date_range": [daily_condensed[0]["date"], daily_condensed[-1]["date"]],
+            "bars": daily_condensed,
+            "ma30": daily_ma30,
+            "ma200": daily_ma200,
+            "ma200_available": daily_ma200_available,
         },
         "weekly": {
             "bars_used": len(weekly_condensed),
             "date_range": [weekly_condensed[0]["date"], weekly_condensed[-1]["date"]],
+            "bars": weekly_condensed,
+            "ma10": weekly_ma10,
+            "ma40": weekly_ma40,
+            "ma40_available": weekly_ma40_available,
         } if weekly_condensed else None,
         "monthly": {
             "bars_used": len(monthly_condensed),
             "date_range": [monthly_condensed[0]["date"], monthly_condensed[-1]["date"]],
+            "bars": monthly_condensed,
+            "ma12": monthly_ma12,
+            "ma12_available": monthly_ma12_available,
         } if monthly_condensed else None,
     }
 
@@ -690,13 +733,35 @@ def handle_chart_analysis(quote_client, symbol):
                 for l in notable_gex_levels
             )
         )
+        # Separately, hand the daily chart a tighter subset for drawing
+        # reference lines - only strikes that actually fall within the
+        # visible daily price range, so the chart doesn't get stretched
+        # to fit a strike from a stale/far-off snapshot.
+        daily_closes_in_view = [b["close"] for b in daily_condensed]
+        lo, hi = min(daily_closes_in_view), max(daily_closes_in_view)
+        pad = (hi - lo) * 0.15 if hi > lo else hi * 0.02
+        timeframes_meta["daily"]["gex_levels"] = [
+            l for l in notable_gex_levels if lo - pad <= l["strike"] <= hi + pad
+        ]
 
     user_content = (
         f"Write the multi-timeframe technical read for {symbol}.\n\n"
         f"DAILY bars ({len(daily_condensed)}, {daily_ma_note}):\n{json.dumps(daily_condensed)}\n\n"
-        f"WEEKLY bars ({len(weekly_condensed)}, {weekly_ma_note}):\n{json.dumps(weekly_condensed)}\n\n"
-        f"MONTHLY bars ({len(monthly_condensed)}, {monthly_ma_note}):\n{json.dumps(monthly_condensed)}"
+        f"WEEKLY bars ({len(weekly_condensed)}, {weekly_ma_note}):\n{json.dumps(weekly_condensed)}"
     )
+    if is_last_week_of_month and monthly_condensed:
+        user_content += (
+            f"\n\nMONTHLY bars ({len(monthly_condensed)}, {monthly_ma_note}):\n{json.dumps(monthly_condensed)}"
+        )
+    else:
+        user_content += (
+            "\n\nMONTHLY: not included this call - by design, the monthly timeframe "
+            "is only refreshed during the last 7 calendar days of each month, since a "
+            "monthly bar barely moves before it closes. Write Weekly and Daily sections "
+            "only (skip the Monthly section and header entirely), and have the "
+            "Multi-timeframe context paragraph speak only to whether Weekly and Daily "
+            "agree or conflict."
+        )
     if gex_note:
         user_content += f"\n\nOptional GEX reference (dealer positioning, not price action):\n{gex_note}"
 
@@ -733,6 +798,7 @@ def handle_chart_analysis(quote_client, symbol):
         "symbol": symbol,
         "analysis": text_block["text"].strip(),
         "timeframes": timeframes_meta,
+        "monthly_included": is_last_week_of_month,
         "gex_reference": {
             "session_date": gex_snapshot.get("session_date"),
             "levels": notable_gex_levels,
