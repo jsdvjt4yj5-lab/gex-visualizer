@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/get-tiger-gex.py": {
+      "maxDuration": 280
+    }
+  }
+}

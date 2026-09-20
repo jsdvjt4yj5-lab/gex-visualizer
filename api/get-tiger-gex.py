@@ -696,23 +696,23 @@ part of every response.
 
 On SPY sessions only, you may also receive a sector context line: the 11
 S&P GICS sectors' percent change across several windows (1-day, 5-day,
-1-month, 3-month, 1-year), ranked strongest to weakest by today's move.
-This is a breadth/rotation check, not price action of the ticker itself.
-The 1-day/5-day figures are for the Daily section only - use them only
+1-month, 3-month), ranked strongest to weakest by today's move. This is
+a breadth/rotation check, not price action of the ticker itself. The
+1-day/5-day figures are for the Daily section only - use them only
 when they genuinely add something to what the price/volume data already
 shows: e.g. today's move is broad-based (most sectors moving the same
 direction) versus narrow (concentrated in one or two, with others flat
 or diverging), or a notably strong/weak sector stands out at the top or
 bottom of the ranking in a way that's relevant context for SPY's own
-move. The 1-month/3-month/1-year figures belong with the Weekly or
-Monthly section instead (whichever's timeframe they're closer to) - use
-them only for genuine multi-week/multi-month rotation context, e.g. a
-sector that's been leading or lagging for months, not for interpreting
-a single day's move. A brief mention is enough wherever it's used - name
-the standout sector(s) and what the spread tells you, don't list all 11,
-and don't force sector commentary into every section just because the
-data exists. If the sectors don't add a meaningfully different picture
-from the price action alone at that timeframe, or this data wasn't
+move. The 1-month/3-month figures belong with the Weekly section
+instead - use them only for genuine multi-week/multi-month rotation
+context, e.g. a sector that's been leading or lagging for a while, not
+for interpreting a single day's move. A brief mention is enough wherever
+it's used - name the standout sector(s) and what the spread tells you,
+don't list all 11, and don't force sector commentary into every section
+just because the data exists. If the sectors don't add a meaningfully
+different picture from the price action alone at that timeframe, or
+this data wasn't
 provided (any ticker other than SPY), don't mention sectors at all.
 
 Structure the response as: a one-line bolded "Summary:" with a single
@@ -738,42 +738,45 @@ never phrase anything as a directive to buy, sell, or take a specific
 action, and never name a specific trade, strike, or options strategy."""
 
 
-def fetch_sector_performance_alphavantage():
-    """Best-effort S&P sector performance via Alpha Vantage's SECTOR
-    endpoint - one API call returns all 11 GICS sectors across several
-    windows at once (1 Day, 5 Day, 1 Month, 3 Month, 1 Year used here),
-    instead of fetching each sector ETF individually via Tiger. Runs on
-    its own key/quota (ALPHAVANTAGE_API_KEY env var; free tier is 25
-    requests/day, 5/min as of this writing) - entirely separate from and
-    doesn't touch the Tiger kline quota at all.
+SPY_SECTOR_ETFS = [
+    ("XLK", "Technology"),
+    ("XLF", "Financials"),
+    ("XLE", "Energy"),
+    ("XLV", "Health Care"),
+    ("XLY", "Consumer Discretionary"),
+    ("XLP", "Consumer Staples"),
+    ("XLI", "Industrials"),
+    ("XLB", "Materials"),
+    ("XLU", "Utilities"),
+    ("XLRE", "Real Estate"),
+    ("XLC", "Communication Services"),
+]
 
-    Returns (data, debug): data is None on any failure (missing key,
-    network error, rate-limited, unexpected response shape) since this
-    is a nice-to-have Chart Analysis should never block or fail on - but
-    debug always describes what actually happened (which of those it
-    was, an HTTP status, an Alpha Vantage error/rate-limit message
-    verbatim, or the keys an unexpected response shape actually had), so
-    a failure is diagnosable via the API response's sector_context_debug
-    field instead of silently vanishing the way it used to.
+# Minimum spacing between Alpha Vantage calls - free tier caps at 5
+# requests/minute (separate from the 25/day cap), so 12s is the bare
+# minimum; 13s leaves a small safety margin against clock drift.
+ALPHAVANTAGE_MIN_CALL_SPACING_SECONDS = 13
+
+
+def fetch_one_sector_etf_alphavantage(symbol, api_key):
+    """Fetch one ETF's daily closes via Alpha Vantage TIME_SERIES_DAILY
+    (compact = latest ~100 daily bars, the free-tier size - outputsize=
+    full is premium-only, so there isn't enough history here for a
+    1-year window, unlike the old SECTOR endpoint this replaced).
+    Returns (closes_oldest_to_newest, debug) - debug always describes
+    what happened (same diagnostic pattern as the rest of this file's
+    Alpha Vantage handling), never silently vanishes on failure.
     """
-    api_key = (os.environ.get("ALPHAVANTAGE_API_KEY") or "").strip()
-    if not api_key:
-        return None, {"status": "no_api_key"}
-
     import urllib.request
     import urllib.error
 
-    url = f"https://www.alphavantage.co/query?function=SECTOR&apikey={api_key}"
+    url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={symbol}&apikey={api_key}"
     req = urllib.request.Request(url, headers={"User-Agent": "gex-visualizer"})
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=8) as resp:
             raw = resp.read().decode()
     except urllib.error.HTTPError as e:
-        return None, {
-            "status": "http_error",
-            "code": e.code,
-            "detail": e.read().decode(errors="replace")[:300],
-        }
+        return None, {"status": "http_error", "code": e.code, "detail": e.read().decode(errors="replace")[:200]}
     except urllib.error.URLError as e:
         return None, {"status": "network_error", "detail": str(e.reason)}
     except Exception as e:
@@ -782,55 +785,97 @@ def fetch_sector_performance_alphavantage():
     try:
         data = json.loads(raw)
     except Exception:
-        return None, {"status": "invalid_json", "raw_preview": raw[:300]}
+        return None, {"status": "invalid_json", "raw_preview": raw[:200]}
 
-    # Alpha Vantage returns HTTP 200 even for a bad key, a rate-limit, or
-    # an unrecognized function - it just swaps the "Rank ..." sections
-    # for an "Information", "Note", or "Error Message" field instead.
-    # Surface that verbatim rather than falling through to the generic
-    # "unexpected shape" case below, since the message itself usually
-    # says exactly what's wrong (e.g. an invalid key, or the free-tier
-    # 25/day cap being hit).
     for error_field in ("Error Message", "Note", "Information"):
         if error_field in data:
-            return None, {"status": "api_error_response", "field": error_field, "detail": str(data[error_field])[:300]}
+            return None, {"status": "api_error_response", "field": error_field, "detail": str(data[error_field])[:200]}
 
-    # Alpha Vantage labels each window "Rank <letter>: <window> Performance"
-    # (e.g. "Rank B: 1 Day Performance") - matched by substring rather than
-    # the exact rank letter, since the letter isn't guaranteed stable and
-    # substring matching is just as simple and more robust to it shifting.
-    def find_window(substring):
-        key = next((k for k in data.keys() if substring in k), None)
-        return data.get(key) if key else None
+    series = data.get("Time Series (Daily)")
+    if not series:
+        return None, {"status": "unexpected_shape", "keys_found": list(data.keys())[:5]}
 
-    windows = {
-        "one_day_pct": find_window("1 Day"),
-        "five_day_pct": find_window("5 Day"),
-        "one_month_pct": find_window("1 Month"),
-        "three_month_pct": find_window("3 Month"),
-        "one_year_pct": find_window("1 Year"),
+    try:
+        dated_closes = sorted(
+            ((d, float(v["4. close"])) for d, v in series.items()),
+            key=lambda item: item[0],
+        )
+    except (KeyError, ValueError, TypeError) as e:
+        return None, {"status": "parse_error", "detail": str(e)}
+
+    return [c for _, c in dated_closes], {"status": "ok", "bars": len(dated_closes)}
+
+
+def fetch_sector_performance_alphavantage():
+    """Best-effort S&P sector performance via 11 sequential Alpha Vantage
+    TIME_SERIES_DAILY calls, one per SPDR sector ETF - the SECTOR
+    endpoint this originally used has been discontinued (confirmed
+    absent from Alpha Vantage's current live API documentation as of
+    this writing; a valid key against it just returns an empty {}).
+
+    Runs on its own key/quota (ALPHAVANTAGE_API_KEY env var; free tier
+    is 25 requests/day, 5 requests/minute as of this writing) - entirely
+    separate from and never touches the Tiger kline quota. 11 calls
+    against a 25/day cap means roughly 2 full sector-context fetches
+    fit in a day before the daily cap is hit (fine for the intended
+    once-a-day usage pattern; a second run same-day would fail with
+    daily-quota debug per ETF, not silently).
+
+    To respect the 5/minute limit, calls are spaced
+    ALPHAVANTAGE_MIN_CALL_SPACING_SECONDS apart, so this function alone
+    takes roughly 2-2.5 minutes for 11 ETFs (see vercel.json - this
+    file's maxDuration is explicitly raised to 280s to give this room;
+    Vercel Hobby's platform default is 300s as of this writing, but
+    that default was raised recently and isn't guaranteed to stay put,
+    so this is pinned explicitly rather than relied on implicitly).
+
+    Returns (data, debug): data is None if every ETF failed (missing
+    key, or all 11 calls individually failed) - a nice-to-have, so
+    Chart Analysis never blocks or fails on this. debug always
+    describes the overall outcome plus a per-ETF breakdown, so a
+    partial result (some ETFs succeeded, others didn't - e.g. hitting
+    the daily cap partway through) is diagnosable via the API
+    response's sector_context_debug field rather than looking like an
+    unexplained gap.
+    """
+    api_key = (os.environ.get("ALPHAVANTAGE_API_KEY") or "").strip()
+    if not api_key:
+        return None, {"status": "no_api_key"}
+
+    import time
+
+    results = []
+    per_etf_debug = {}
+    for i, (symbol, name) in enumerate(SPY_SECTOR_ETFS):
+        if i > 0:
+            time.sleep(ALPHAVANTAGE_MIN_CALL_SPACING_SECONDS)
+        closes, debug = fetch_one_sector_etf_alphavantage(symbol, api_key)
+        per_etf_debug[symbol] = debug
+        if not closes or len(closes) < 2:
+            continue
+
+        def pct_change(lookback):
+            if len(closes) <= lookback:
+                return None
+            return round((closes[-1] / closes[-1 - lookback] - 1) * 100, 2)
+
+        results.append({
+            "sector": name,
+            "symbol": symbol,
+            "one_day_pct": pct_change(1),
+            "five_day_pct": pct_change(5),
+            "one_month_pct": pct_change(21),   # ~21 trading days/month
+            "three_month_pct": pct_change(63),  # ~63 trading days/quarter
+        })
+
+    if not results:
+        return None, {"status": "all_failed", "per_etf": per_etf_debug}
+
+    return results, {
+        "status": "ok" if len(results) == len(SPY_SECTOR_ETFS) else "partial",
+        "sector_count": len(results),
+        "per_etf": per_etf_debug,
     }
-    if not any(windows.values()):
-        return None, {"status": "unexpected_shape", "keys_found": list(data.keys())[:10]}
-
-    def parse_pct(s):
-        try:
-            return float(s.strip().rstrip("%"))
-        except (TypeError, ValueError, AttributeError):
-            return None
-
-    all_sectors = sorted({sector for w in windows.values() if w for sector in w.keys()})
-    result = [
-        {
-            "sector": sector,
-            **{
-                field: parse_pct(w.get(sector)) if w else None
-                for field, w in windows.items()
-            },
-        }
-        for sector in all_sectors
-    ]
-    return result, {"status": "ok", "sector_count": len(result)}
 
 
 def _condense_bars(bars, n):
@@ -1032,7 +1077,6 @@ def handle_chart_analysis(quote_client, symbol):
                 (s["five_day_pct"], "5d"),
                 (s["one_month_pct"], "1mo"),
                 (s["three_month_pct"], "3mo"),
-                (s["one_year_pct"], "1yr"),
             ]
             pieces = [f"{v:+.1f}%/{label}" for v, label in windows if v is not None]
             return f"{s['sector']} (" + ", ".join(pieces) + ")"
