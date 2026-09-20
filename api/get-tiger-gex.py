@@ -329,14 +329,39 @@ def next_triple_witching(from_date):
     return None
 
 
-def opex_context_note(today_date):
+# SPY's quarterly ex-dividend dates. Unlike op-ex/triple witching, this is
+# NOT a fixed calendar rule - it's whatever State Street's board declares
+# each quarter, and while it's usually close to that quarter's third
+# Friday, it isn't always exactly that day: the June 2026 ex-date
+# (2026-06-18) fell on the Thursday before that quarter's third-Friday
+# triple witching (2026-06-19), confirmed via State Street/broker
+# dividend histories. So this is a maintained list of CONFIRMED dates,
+# not a formula - State Street typically only announces each quarter's
+# date a few weeks ahead, so add the next one here once it's confirmed
+# (check a broker's SPY dividend history or ssga.com). Kept in sync with
+# the identical list in api/coffee-and-tea.js.
+SPY_DIVIDEND_EX_DATES = [
+    date(2025, 12, 19),
+    date(2026, 3, 20),
+    date(2026, 6, 18),
+    date(2026, 9, 18),
+    # 2026-12 not yet announced as of this writing (Sept 2026) - add once confirmed
+]
+
+
+def next_spy_dividend_ex_date(from_date):
+    upcoming = sorted(d for d in SPY_DIVIDEND_EX_DATES if d >= from_date)
+    return upcoming[0] if upcoming else None
+
+
+def opex_context_note(today_date, symbol):
     """Best-effort, purely calendar-computed (no API call) note on where
-    today sits relative to the next monthly options expiration and next
-    quarterly triple witching - used to give Chart Analysis awareness of
-    expiration-driven price behavior (pinning into the close, a
-    volatility pickup right after as dealer hedges roll off) without any
-    GEX/options-chain data at all, so it works even when the D1 GEX
-    reference (see fetch_latest_snapshot_from_d1) is unavailable.
+    today sits relative to the next monthly options expiration, next
+    quarterly triple witching, and (SPY only) next confirmed SPY dividend
+    ex-date - used to give Chart Analysis awareness of expiration/
+    dividend-driven price behavior without any GEX/options-chain data at
+    all, so it works even when the D1 GEX reference (see fetch_latest_
+    snapshot_from_d1) is unavailable.
     """
     next_opex = next_monthly_opex(today_date)
     next_witching = next_triple_witching(today_date)
@@ -353,7 +378,20 @@ def opex_context_note(today_date):
         if is_today_witching
         else f"next quarterly triple witching: {next_witching.isoformat()}"
     )
-    return f"Today ({today_date.isoformat()}) {opex_part}; {witching_part}."
+    note = f"Today ({today_date.isoformat()}) {opex_part}; {witching_part}."
+
+    if symbol.upper() == "SPY":
+        next_div = next_spy_dividend_ex_date(today_date)
+        if next_div:
+            is_today_div = next_div == today_date
+            div_part = (
+                "Today IS also SPY's confirmed dividend ex-date."
+                if is_today_div
+                else f"Next confirmed SPY dividend ex-date: {next_div.isoformat()}."
+            )
+            note += f" {div_part}"
+
+    return note
 
 
 def years_to_expiry(expiry_date_str, now_et):
@@ -639,16 +677,22 @@ where today sits relative to the next monthly options expiration (third
 Friday of the month) and next quarterly triple witching (third Friday of
 March/June/September/December, when stock index futures, index options,
 and equity options all expire together) - purely a calendar fact, not
-GEX or dealer-positioning data. Mention this only when it's genuinely
-close enough to matter for the Daily section: today itself is one of
-these dates, or one falls within roughly the next 3-5 trading days from
-the most recent daily bar. In that case, one sentence is enough - note
-which one it is and that expiration-driven flows (pinning into the close
-beforehand, a possible volatility pickup right after as dealer hedges
-roll off) could account for some of the price behavior you're already
-describing. If the next occurrence is weeks away, don't mention it at
-all - this is a brief situational note, never its own section or a
-mandatory part of every response.
+GEX or dealer-positioning data. On SPY sessions, this line also includes
+the next confirmed SPY dividend ex-date (a maintained list of announced
+dates, not a formula - so it may occasionally be absent if the next
+quarter's date hasn't been announced yet). Mention any of these only
+when genuinely close enough to matter for the Daily section: today
+itself is one of these dates, or one falls within roughly the next 3-5
+trading days from the most recent daily bar. In that case, one sentence
+is enough per item - name which one it is and the relevant mechanism:
+op-ex/triple witching can drive pinning into the close beforehand and/or
+a volatility pickup right after as dealer hedges roll off; a dividend
+ex-date causes a small, mechanical gap down in the underlying by roughly
+the dividend amount at the open (dealers typically hedge this, so it's
+more predictable and smaller in magnitude than an op-ex unwind). If the
+next occurrence of any of these is weeks away, don't mention it at all -
+this is a brief situational note, never its own section or a mandatory
+part of every response.
 
 On SPY sessions only, you may also receive a sector context line: the 11
 S&P GICS sectors' percent change across several windows (1-day, 5-day,
@@ -934,7 +978,7 @@ def handle_chart_analysis(quote_client, symbol):
     if gex_note:
         user_content += f"\n\nOptional GEX reference (dealer positioning, not price action):\n{gex_note}"
 
-    opex_note = opex_context_note(today_et)
+    opex_note = opex_context_note(today_et, symbol)
     if opex_note:
         user_content += f"\n\nOptions expiration context (calendar fact): {opex_note}"
 
