@@ -650,6 +650,27 @@ describing. If the next occurrence is weeks away, don't mention it at
 all - this is a brief situational note, never its own section or a
 mandatory part of every response.
 
+On SPY sessions only, you may also receive a sector context line: the 11
+S&P GICS sectors' percent change across several windows (1-day, 5-day,
+1-month, 3-month, 1-year), ranked strongest to weakest by today's move.
+This is a breadth/rotation check, not price action of the ticker itself.
+The 1-day/5-day figures are for the Daily section only - use them only
+when they genuinely add something to what the price/volume data already
+shows: e.g. today's move is broad-based (most sectors moving the same
+direction) versus narrow (concentrated in one or two, with others flat
+or diverging), or a notably strong/weak sector stands out at the top or
+bottom of the ranking in a way that's relevant context for SPY's own
+move. The 1-month/3-month/1-year figures belong with the Weekly or
+Monthly section instead (whichever's timeframe they're closer to) - use
+them only for genuine multi-week/multi-month rotation context, e.g. a
+sector that's been leading or lagging for months, not for interpreting
+a single day's move. A brief mention is enough wherever it's used - name
+the standout sector(s) and what the spread tells you, don't list all 11,
+and don't force sector commentary into every section just because the
+data exists. If the sectors don't add a meaningfully different picture
+from the price action alone at that timeframe, or this data wasn't
+provided (any ticker other than SPY), don't mention sectors at all.
+
 Structure the response as: a one-line bolded "Summary:" with a single
 sentence capturing the whole picture, then bolded section headers in
 this order - "Monthly:" (only when monthly data was provided), then
@@ -671,6 +692,70 @@ paragraphs under each header, no bullet points.
 This is not financial advice. Describe structure and price history only -
 never phrase anything as a directive to buy, sell, or take a specific
 action, and never name a specific trade, strike, or options strategy."""
+
+
+def fetch_sector_performance_alphavantage():
+    """Best-effort S&P sector performance via Alpha Vantage's SECTOR
+    endpoint - one API call returns all 11 GICS sectors across several
+    windows at once (1 Day, 5 Day, 1 Month, 3 Month, 1 Year used here),
+    instead of fetching each sector ETF individually via Tiger. Runs on
+    its own key/quota (ALPHAVANTAGE_API_KEY env var; free tier is 25
+    requests/day, 5/min as of this writing) - entirely separate from and
+    doesn't touch the Tiger kline quota at all. Returns None on any
+    failure (missing key, network error, rate-limited, unexpected
+    response shape) - this is a nice-to-have, never something Chart
+    Analysis should block or fail on.
+    """
+    api_key = (os.environ.get("ALPHAVANTAGE_API_KEY") or "").strip()
+    if not api_key:
+        return None
+
+    import urllib.request
+    import urllib.error
+
+    url = f"https://www.alphavantage.co/query?function=SECTOR&apikey={api_key}"
+    req = urllib.request.Request(url, headers={"User-Agent": "gex-visualizer"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception:
+        return None
+
+    # Alpha Vantage labels each window "Rank <letter>: <window> Performance"
+    # (e.g. "Rank B: 1 Day Performance") - matched by substring rather than
+    # the exact rank letter, since the letter isn't guaranteed stable and
+    # substring matching is just as simple and more robust to it shifting.
+    def find_window(substring):
+        key = next((k for k in data.keys() if substring in k), None)
+        return data.get(key) if key else None
+
+    windows = {
+        "one_day_pct": find_window("1 Day"),
+        "five_day_pct": find_window("5 Day"),
+        "one_month_pct": find_window("1 Month"),
+        "three_month_pct": find_window("3 Month"),
+        "one_year_pct": find_window("1 Year"),
+    }
+    if not any(windows.values()):
+        return None  # unexpected shape - e.g. a rate-limit "Note" instead of real data
+
+    def parse_pct(s):
+        try:
+            return float(s.strip().rstrip("%"))
+        except (TypeError, ValueError, AttributeError):
+            return None
+
+    all_sectors = sorted({sector for w in windows.values() if w for sector in w.keys()})
+    return [
+        {
+            "sector": sector,
+            **{
+                field: parse_pct(w.get(sector)) if w else None
+                for field, w in windows.items()
+            },
+        }
+        for sector in all_sectors
+    ]
 
 
 def _condense_bars(bars, n):
@@ -853,6 +938,36 @@ def handle_chart_analysis(quote_client, symbol):
     if opex_note:
         user_content += f"\n\nOptions expiration context (calendar fact): {opex_note}"
 
+    # SPY only - broad-market sector breadth isn't meaningful context for
+    # an arbitrary single ticker the way it is for the index itself.
+    sector_data = fetch_sector_performance_alphavantage() if symbol.upper() == "SPY" else None
+    sector_note = None
+    if sector_data:
+        ranked = sorted(
+            sector_data,
+            key=lambda s: s["one_day_pct"] if s["one_day_pct"] is not None else -999,
+            reverse=True,
+        )
+
+        def fmt_sector(s):
+            windows = [
+                (s["one_day_pct"], "1d"),
+                (s["five_day_pct"], "5d"),
+                (s["one_month_pct"], "1mo"),
+                (s["three_month_pct"], "3mo"),
+                (s["one_year_pct"], "1yr"),
+            ]
+            pieces = [f"{v:+.1f}%/{label}" for v, label in windows if v is not None]
+            return f"{s['sector']} (" + ", ".join(pieces) + ")"
+
+        sector_note = "; ".join(fmt_sector(s) for s in ranked)
+    if sector_note:
+        user_content += (
+            f"\n\nOptional sector context (SPY only - the 11 S&P GICS sectors' "
+            f"performance across several windows, ranked strongest to weakest "
+            f"by today's move): {sector_note}"
+        )
+
     payload = json.dumps({
         "model": "claude-sonnet-4-6",
         "max_tokens": 1800,
@@ -887,6 +1002,7 @@ def handle_chart_analysis(quote_client, symbol):
         "analysis": text_block["text"].strip(),
         "timeframes": timeframes_meta,
         "monthly_included": is_last_week_of_month,
+        "sector_context": sector_data or None,
         "gex_reference": {
             "session_date": gex_snapshot.get("session_date"),
             "levels": notable_gex_levels,
