@@ -62,20 +62,69 @@ function nextTripleWitching(fromDateStr) {
   return null;
 }
 
+function daysBetween(fromDateStr, toDateStr) {
+  const a = new Date(fromDateStr + 'T00:00:00Z');
+  const b = new Date(toDateStr + 'T00:00:00Z');
+  return Math.round((b - a) / 86400000);
+}
+
+// SPY's quarterly ex-dividend dates. Unlike op-ex/triple witching, this
+// is NOT a fixed calendar rule - it's whatever State Street's board
+// declares each quarter, and while it's usually close to that quarter's
+// third Friday, it isn't always exactly that day: the June 2026 ex-date
+// (2026-06-18) fell on the Thursday before that quarter's third-Friday
+// triple witching (2026-06-19), confirmed via State Street/broker
+// dividend histories. So this is a maintained list of CONFIRMED dates,
+// not a formula - State Street typically only announces each quarter's
+// date a few weeks ahead, so add the next one here once it's confirmed
+// (check a broker's SPY dividend history or ssga.com).
+const SPY_DIVIDEND_EX_DATES = [
+  '2025-12-19',
+  '2026-03-20',
+  '2026-06-18',
+  '2026-09-18',
+  // 2026-12 not yet announced as of this writing (Sept 2026) - add once confirmed
+];
+
+function nextSpyDividendExDate(fromDateStr) {
+  const upcoming = SPY_DIVIDEND_EX_DATES.filter((d) => d >= fromDateStr).sort();
+  return upcoming[0] || null;
+}
+
 // Best-effort calendar note for one date (session_date or expiration) -
-// purely date math, never GEX/options-chain data, so it's always
-// available regardless of chain data quality or D1 storage state.
-function opexContextForDate(dateStr) {
+// op-ex/triple-witching are pure date math and available for any ticker;
+// the SPY dividend check only applies when the session's ticker is SPY
+// (or unspecified, which defaults to SPY elsewhere in this file), since
+// SPY_DIVIDEND_EX_DATES is SPY-specific. LOOKAHEAD_DAYS controls how far
+// ahead any of these are flagged as "coming up" (currently 14).
+const LOOKAHEAD_DAYS = 14;
+function opexContextForDate(dateStr, ticker) {
   if (!dateStr) return null;
   const nextOpex = nextMonthlyOpex(dateStr);
   const nextWitching = nextTripleWitching(dateStr);
   if (!nextOpex || !nextWitching) return null;
+  const isSpy = !ticker || ticker.toUpperCase() === 'SPY';
+  const nextDivExDate = isSpy ? nextSpyDividendExDate(dateStr) : null;
   return {
     date: dateStr,
-    is_monthly_opex: nextOpex === dateStr,
-    is_triple_witching: nextWitching === dateStr,
-    next_monthly_opex: nextOpex,
-    next_triple_witching: nextWitching,
+    monthly_opex: {
+      date: nextOpex,
+      is_today: nextOpex === dateStr,
+      days_until: daysBetween(dateStr, nextOpex),
+      within_lookahead: daysBetween(dateStr, nextOpex) <= LOOKAHEAD_DAYS,
+    },
+    triple_witching: {
+      date: nextWitching,
+      is_today: nextWitching === dateStr,
+      days_until: daysBetween(dateStr, nextWitching),
+      within_lookahead: daysBetween(dateStr, nextWitching) <= LOOKAHEAD_DAYS,
+    },
+    spy_dividend_ex_date: nextDivExDate ? {
+      date: nextDivExDate,
+      is_today: nextDivExDate === dateStr,
+      days_until: daysBetween(dateStr, nextDivExDate),
+      within_lookahead: daysBetween(dateStr, nextDivExDate) <= LOOKAHEAD_DAYS,
+    } : null,
   };
 }
 
@@ -146,19 +195,27 @@ elevated-risk-window caution to range/credit strategy guidance in
 macro_context.per_strategy_guidance.
 
 9a. Options expiration catalyst tie-in: the input's
-options_expiration_context gives session_date and expiration each a
-calendar fact (is_monthly_opex, is_triple_witching, next_monthly_opex,
-next_triple_witching) - purely date math, not GEX or chain data. If
-is_monthly_opex or is_triple_witching is true for session_date or
+options_expiration_context gives session_date and expiration each three
+sub-objects - monthly_opex, triple_witching, and (SPY sessions only)
+spy_dividend_ex_date - each with date, is_today, days_until, and
+within_lookahead (true when days_until is 14 or fewer). This is purely
+calendar/schedule data (date math for op-ex/witching, a maintained list
+of confirmed dates for the SPY dividend), never GEX or chain data.
+Whenever any of the three has within_lookahead true for session_date or
 expiration, treat it the same as a macro_events_this_window catalyst:
-flag it explicitly in trade_thesis (name which one - monthly op-ex or
-the larger quarterly triple witching), note that large expiring open
-interest can drive pinning toward a max-pain-like level into the close
-and/or a volatility pickup right after as dealer hedges roll off, and
-add the same elevated-risk-window caution to range/credit strategy
-guidance in macro_context.per_strategy_guidance. If neither date is
-true, do not mention op-ex/triple witching at all - this is a same-day
-flag only, never a forward-looking "op-ex is coming up in N weeks" note.
+flag it explicitly in trade_thesis, naming which one(s) (monthly op-ex,
+the larger quarterly triple witching, and/or the SPY dividend ex-date)
+and how many days out (today, or "in N days"), and add an
+elevated-risk-window caution to range/credit strategy guidance in
+macro_context.per_strategy_guidance. The mechanism differs by type - say
+so accordingly: op-ex/triple witching can drive pinning toward a
+max-pain-like level into the close and/or a volatility pickup right
+after as dealer hedges roll off; a dividend ex-date causes a mechanical,
+known-in-advance gap down in the underlying by roughly the dividend
+amount at the open (dealers holding short calls typically hedge this,
+so it's a smaller, more predictable effect than an op-ex unwind, but
+still worth noting for strikes very close to spot). If none of the three
+has within_lookahead true, do not mention any of this at all.
 
 10. REALIZED-VS-IMPLIED VOL CHECK (finalized): use the iv_used_pct/
 iv_source provided directly in the input (see step 2) - do not compute or
@@ -403,9 +460,10 @@ export default async function handler(req, res) {
     // isn't. Session date and expiration are usually the same day for
     // this single-expiry workflow, but both are checked independently
     // in case they ever differ.
+    const inputTicker = input.ticker || 'SPY';
     const optionsExpirationContext = {
-      session_date: opexContextForDate(input.session_date),
-      expiration: opexContextForDate(input.expiration),
+      session_date: opexContextForDate(input.session_date, inputTicker),
+      expiration: opexContextForDate(input.expiration, inputTicker),
     };
     const modelInput = {
       ...input,
