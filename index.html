@@ -370,20 +370,34 @@
   <button id="chartAnalysisBtn" type="button">Generate chart analysis</button>
 </div>
 <div class="status" id="chartAnalysisStatus"></div>
-<div id="chartAnalysisOutput" style="margin-top:12px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd; display:none;"></div>
-<div id="chartAnalysisChartsWrap" style="display:none; margin-top:16px;">
-  <div id="chartAnalysisMonthlyLabel" style="font-size:12px; color:#888; margin-bottom:4px;">Monthly</div>
-  <div id="chartAnalysisMonthlyChartWrap" style="position:relative; height:0;">
-    <canvas id="chartAnalysisMonthlyChart"></canvas>
+<div id="chartAnalysisOutput" style="margin-top:12px; display:none;">
+  <div id="chartAnalysisSummary" style="padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+
+  <div id="chartAnalysisMonthlySection" style="display:none; margin-top:16px;">
+    <h3 style="font-size:13px; color:#888; margin:0 0 6px;">Monthly</h3>
+    <div id="chartAnalysisMonthlyText" style="padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+    <div id="chartAnalysisMonthlyChartWrap" style="position:relative; height:0; margin-top:12px;">
+      <canvas id="chartAnalysisMonthlyChart"></canvas>
+    </div>
   </div>
-  <div style="font-size:12px; color:#888; margin:16px 0 4px;">Weekly</div>
-  <div id="chartAnalysisWeeklyChartWrap" style="position:relative; height:0;">
-    <canvas id="chartAnalysisWeeklyChart"></canvas>
+
+  <div id="chartAnalysisWeeklySection" style="margin-top:16px;">
+    <h3 style="font-size:13px; color:#888; margin:0 0 6px;">Weekly</h3>
+    <div id="chartAnalysisWeeklyText" style="padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+    <div id="chartAnalysisWeeklyChartWrap" style="position:relative; height:0; margin-top:12px;">
+      <canvas id="chartAnalysisWeeklyChart"></canvas>
+    </div>
   </div>
-  <div style="font-size:12px; color:#888; margin:16px 0 4px;">Daily</div>
-  <div id="chartAnalysisDailyChartWrap" style="position:relative; height:0;">
-    <canvas id="chartAnalysisDailyChart"></canvas>
+
+  <div id="chartAnalysisDailySection" style="margin-top:16px;">
+    <h3 style="font-size:13px; color:#888; margin:0 0 6px;">Daily</h3>
+    <div id="chartAnalysisDailyText" style="padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
+    <div id="chartAnalysisDailyChartWrap" style="position:relative; height:0; margin-top:12px;">
+      <canvas id="chartAnalysisDailyChart"></canvas>
+    </div>
   </div>
+
+  <div id="chartAnalysisMultiTimeframe" style="margin-top:16px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
 </div>
 <button id="chartAnalysisPdfBtn" style="margin-top:12px;">Download PDF</button>
 </div>
@@ -934,13 +948,76 @@ const chartAnalysisTickerInput = document.getElementById('chartAnalysisTickerInp
 const chartAnalysisBtn = document.getElementById('chartAnalysisBtn');
 const chartAnalysisStatus = document.getElementById('chartAnalysisStatus');
 const chartAnalysisOutput = document.getElementById('chartAnalysisOutput');
-const chartAnalysisChartsWrap = document.getElementById('chartAnalysisChartsWrap');
-const chartAnalysisMonthlyLabel = document.getElementById('chartAnalysisMonthlyLabel');
+const chartAnalysisSummary = document.getElementById('chartAnalysisSummary');
+const chartAnalysisMonthlySection = document.getElementById('chartAnalysisMonthlySection');
+const chartAnalysisMonthlyText = document.getElementById('chartAnalysisMonthlyText');
 const chartAnalysisMonthlyChartWrap = document.getElementById('chartAnalysisMonthlyChartWrap');
+const chartAnalysisWeeklySection = document.getElementById('chartAnalysisWeeklySection');
+const chartAnalysisWeeklyText = document.getElementById('chartAnalysisWeeklyText');
 const chartAnalysisWeeklyChartWrap = document.getElementById('chartAnalysisWeeklyChartWrap');
+const chartAnalysisDailySection = document.getElementById('chartAnalysisDailySection');
+const chartAnalysisDailyText = document.getElementById('chartAnalysisDailyText');
 const chartAnalysisDailyChartWrap = document.getElementById('chartAnalysisDailyChartWrap');
+const chartAnalysisMultiTimeframe = document.getElementById('chartAnalysisMultiTimeframe');
 const chartAnalysisPdfBtn = document.getElementById('chartAnalysisPdfBtn');
 let currentChartAnalysis = null;
+
+// Splits the model's response into named sections keyed by its own bolded
+// headers ("**Weekly:**", "**Daily:**", etc. - see CHART_ANALYSIS_SYSTEM_
+// PROMPT on the backend for the exact structure it's asked to follow), so
+// each section's text can be placed directly above its own chart instead
+// of one undivided block sitting above three stacked charts.
+const CHART_ANALYSIS_SECTION_KEYS = {
+  'summary': 'summary',
+  'monthly': 'monthly',
+  'weekly': 'weekly',
+  'daily': 'daily',
+  'multi-timeframe context': 'multiTimeframe',
+};
+function parseChartAnalysisSections(text) {
+  const sections = {};
+  const lines = (text || '').split('\n');
+  let currentKey = null;
+  let buffer = [];
+  const flush = () => {
+    if (currentKey) {
+      const joined = buffer.join('\n').trim();
+      if (joined) sections[currentKey] = joined;
+    }
+    buffer = [];
+  };
+  lines.forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (/^-{3,}$/.test(line)) return; // a "---" divider line - not content, not a header
+    // Header detection is line-based, not paragraph-based, and tolerates
+    // the model sometimes skipping the ** bold wrapping it was asked
+    // for (observed in practice) - matches "Weekly:", "**Weekly:**", and
+    // "Summary: <text on the same line>" alike.
+    const headerMatch = line.match(/^\*{0,2}\s*([A-Za-z][A-Za-z\- ]{1,30}?)\s*:\s*\*{0,2}\s*(.*)$/);
+    const headerKey = headerMatch ? CHART_ANALYSIS_SECTION_KEYS[headerMatch[1].trim().toLowerCase()] : null;
+    if (headerKey) {
+      flush();
+      currentKey = headerKey;
+      buffer = headerMatch[2].trim() ? [headerMatch[2].trim()] : [];
+      return;
+    }
+    if (currentKey) buffer.push(line);
+  });
+  flush();
+  return sections;
+}
+
+// Minimal **bold** + paragraph markdown-to-HTML for the on-page view only
+// (the PDF export below has its own word-wrapping renderer already).
+function chartAnalysisMdToHtml(text) {
+  const escape = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return (text || '')
+    .split(/\n\s*\n/)
+    .map((para) => escape(para.trim()).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>'))
+    .filter(Boolean)
+    .map((p) => `<p style="margin:0 0 10px;">${p}</p>`)
+    .join('');
+}
 
 // Renders one timeframe's close-price line plus flat reference lines for
 // its moving average(s) and (daily only) any notable GEX strikes that
@@ -994,7 +1071,12 @@ function renderChartAnalysisTimeframeChart(wrap, canvasId, existingInstance, tfD
   });
 }
 
-function renderChartAnalysisCharts(tf) {
+function renderChartAnalysisResult(data) {
+  const tf = data.timeframes || {};
+  const sections = parseChartAnalysisSections(data.analysis);
+
+  chartAnalysisSummary.innerHTML = chartAnalysisMdToHtml(sections.summary || data.analysis);
+
   const gexRefLines = (tf.daily?.gex_levels || []).map((l) => ({
     label: `GEX ${l.strike}${l.is_flip_zone ? ' (flip)' : ''}`,
     value: l.strike,
@@ -1002,24 +1084,26 @@ function renderChartAnalysisCharts(tf) {
   }));
 
   if (tf.monthly?.bars?.length) {
-    chartAnalysisMonthlyLabel.style.display = '';
-    chartAnalysisMonthlyChartWrap.style.display = '';
+    chartAnalysisMonthlySection.style.display = '';
+    chartAnalysisMonthlyText.innerHTML = chartAnalysisMdToHtml(sections.monthly);
     chartAnalysisMonthlyChartInstance = renderChartAnalysisTimeframeChart(
       chartAnalysisMonthlyChartWrap, 'chartAnalysisMonthlyChart', chartAnalysisMonthlyChartInstance,
       tf.monthly, [{ label: '12-mo MA', value: tf.monthly.ma12, color: '#eda100' }], 'Monthly'
     );
   } else {
-    // Not the last week of the month - monthly wasn't re-fetched this
-    // call. Hide the section rather than leaving a stale chart from an
-    // earlier "last week of month" run sitting there unlabeled.
+    // Not the last week of the month (or the fetch otherwise came back
+    // without monthly data) - hide the section rather than leaving a
+    // stale chart or empty text block from an earlier run in view.
     if (chartAnalysisMonthlyChartInstance) {
       chartAnalysisMonthlyChartInstance.destroy();
       chartAnalysisMonthlyChartInstance = null;
     }
-    chartAnalysisMonthlyLabel.style.display = 'none';
-    chartAnalysisMonthlyChartWrap.style.display = 'none';
+    chartAnalysisMonthlySection.style.display = 'none';
   }
+
   if (tf.weekly?.bars?.length) {
+    chartAnalysisWeeklySection.style.display = '';
+    chartAnalysisWeeklyText.innerHTML = chartAnalysisMdToHtml(sections.weekly);
     chartAnalysisWeeklyChartInstance = renderChartAnalysisTimeframeChart(
       chartAnalysisWeeklyChartWrap, 'chartAnalysisWeeklyChart', chartAnalysisWeeklyChartInstance,
       tf.weekly,
@@ -1029,8 +1113,13 @@ function renderChartAnalysisCharts(tf) {
       ],
       'Weekly'
     );
+  } else {
+    chartAnalysisWeeklySection.style.display = 'none';
   }
+
   if (tf.daily?.bars?.length) {
+    chartAnalysisDailySection.style.display = '';
+    chartAnalysisDailyText.innerHTML = chartAnalysisMdToHtml(sections.daily);
     chartAnalysisDailyChartInstance = renderChartAnalysisTimeframeChart(
       chartAnalysisDailyChartWrap, 'chartAnalysisDailyChart', chartAnalysisDailyChartInstance,
       tf.daily,
@@ -1041,10 +1130,20 @@ function renderChartAnalysisCharts(tf) {
       ],
       'Daily'
     );
+  } else {
+    chartAnalysisDailySection.style.display = 'none';
   }
-  chartAnalysisChartsWrap.style.display =
-    (tf.daily?.bars?.length || tf.weekly?.bars?.length || tf.monthly?.bars?.length) ? 'block' : 'none';
+
+  if (sections.multiTimeframe) {
+    chartAnalysisMultiTimeframe.style.display = '';
+    chartAnalysisMultiTimeframe.innerHTML =
+      '<p style="margin:0 0 6px;"><strong>Multi-timeframe context</strong></p>' +
+      chartAnalysisMdToHtml(sections.multiTimeframe);
+  } else {
+    chartAnalysisMultiTimeframe.style.display = 'none';
+  }
 }
+
 
 // Renders **bold** markdown from the AI's response as real bold text
 // inside a jsPDF doc, word-wrapping (and paragraph-breaking on blank
@@ -1106,10 +1205,9 @@ async function generateChartAnalysis() {
     if (!res.ok || data.error) {
       throw new Error(data.error || `Request failed (${res.status})`);
     }
-    chartAnalysisOutput.textContent = data.analysis;
     chartAnalysisOutput.style.display = 'block';
     const tf = data.timeframes || {};
-    renderChartAnalysisCharts(tf);
+    renderChartAnalysisResult(data);
     const tfSummary = ['daily', 'weekly', 'monthly']
       .map((k) => tf[k] ? `${tf[k].bars_used} ${k}` : null)
       .filter(Boolean)
@@ -1127,6 +1225,7 @@ async function generateChartAnalysis() {
     currentChartAnalysis = {
       ticker,
       analysis: data.analysis,
+      sections: parseChartAnalysisSections(data.analysis),
       timeframes: data.timeframes,
       gexReference: data.gex_reference,
       bars_used: data.bars_used,
@@ -1136,7 +1235,7 @@ async function generateChartAnalysis() {
     chartAnalysisStatus.textContent = 'Chart analysis failed: ' + err.message;
     chartAnalysisStatus.className = 'status error';
     currentChartAnalysis = null;
-    chartAnalysisChartsWrap.style.display = 'none';
+    chartAnalysisOutput.style.display = 'none';
   } finally {
     chartAnalysisBtn.disabled = false;
   }
@@ -1151,7 +1250,9 @@ async function downloadChartAnalysisPdf() {
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ unit: 'pt', format: 'letter' });
     const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
     const margin = 48;
+    const contentWidth = pageWidth - margin * 2;
     let y = margin;
 
     doc.setFontSize(16);
@@ -1190,59 +1291,83 @@ async function downloadChartAnalysisPdf() {
     }
     doc.setTextColor(0);
 
-    doc.setFontSize(12);
-    doc.setFont(undefined, 'bold');
-    doc.text('Analysis', margin, y);
-    y += 16;
+    // Summary up top, same as the on-page view.
+    const sections = currentChartAnalysis.sections || {};
+    if (sections.summary) {
+      doc.setFontSize(12);
+      doc.setFont(undefined, 'bold');
+      doc.text('Summary', margin, y);
+      y += 16;
+      doc.setFontSize(10.5);
+      y = renderFormattedText(doc, sections.summary, margin, y, contentWidth, 14, margin);
+      y += 10;
+    }
 
-    doc.setFontSize(10.5);
-    y = renderFormattedText(doc, currentChartAnalysis.analysis, margin, y, pageWidth - margin * 2, 14, margin);
+    // Each timeframe's own text directly followed by its own chart image -
+    // matching the on-page layout - instead of all text up top and all
+    // charts stacked at the end. Only sections a chart actually rendered
+    // for are included (the canvas has real pixel dimensions), so a
+    // failed/partial fetch doesn't produce a blank chart under real text.
+    const timeframeSections = [
+      { key: 'monthly', canvasId: 'chartAnalysisMonthlyChart', label: 'Monthly' },
+      { key: 'weekly', canvasId: 'chartAnalysisWeeklyChart', label: 'Weekly' },
+      { key: 'daily', canvasId: 'chartAnalysisDailyChart', label: 'Daily' },
+    ];
+
+    timeframeSections.forEach(({ key, canvasId, label }) => {
+      const canvas = document.getElementById(canvasId);
+      const hasChart = canvas && canvas.width > 0 && canvas.height > 0;
+      const text = sections[key];
+      if (!hasChart && !text) return;
+
+      if (y > margin + 40 && y + 60 > pageHeight - margin) {
+        doc.addPage();
+        y = margin;
+      }
+
+      doc.setFontSize(13);
+      doc.setFont(undefined, 'bold');
+      doc.text(label, margin, y);
+      y += 18;
+
+      if (text) {
+        doc.setFontSize(10.5);
+        y = renderFormattedText(doc, text, margin, y, contentWidth, 14, margin);
+        y += 8;
+      }
+
+      if (hasChart) {
+        const imgHeight = (canvas.height / canvas.width) * contentWidth;
+        if (y + imgHeight > pageHeight - margin) {
+          doc.addPage();
+          y = margin;
+        }
+        const imgData = canvas.toDataURL('image/png', 1.0);
+        doc.addImage(imgData, 'PNG', margin, y, contentWidth, imgHeight);
+        y += imgHeight + 20;
+      }
+    });
+
+    if (sections.multiTimeframe) {
+      if (y + 40 > pageHeight - margin) {
+        doc.addPage();
+        y = margin;
+      }
+      doc.setFontSize(12);
+      doc.setFont(undefined, 'bold');
+      doc.text('Multi-timeframe context', margin, y);
+      y += 16;
+      doc.setFontSize(10.5);
+      y = renderFormattedText(doc, sections.multiTimeframe, margin, y, contentWidth, 14, margin);
+    }
 
     doc.setFontSize(8);
     doc.setTextColor(150);
     doc.text(
       'AI-written technical read of price action only - separate from the GEX-based reads. Not financial advice.',
       margin,
-      doc.internal.pageSize.getHeight() - 24
+      pageHeight - 24
     );
-
-    // Chart images (Monthly, Weekly, Daily), each on their own page if
-    // needed - only included when a chart actually rendered (the canvas
-    // has real pixel dimensions), so a failed/partial fetch doesn't
-    // produce blank chart pages.
-    const chartCanvases = [
-      { id: 'chartAnalysisMonthlyChart', label: 'Monthly' },
-      { id: 'chartAnalysisWeeklyChart', label: 'Weekly' },
-      { id: 'chartAnalysisDailyChart', label: 'Daily' },
-    ]
-      .map((c) => ({ ...c, canvas: document.getElementById(c.id) }))
-      .filter((c) => c.canvas && c.canvas.width > 0 && c.canvas.height > 0);
-
-    if (chartCanvases.length) {
-      doc.addPage();
-      let cy = margin;
-      doc.setTextColor(0);
-      doc.setFontSize(14);
-      doc.setFont(undefined, 'bold');
-      doc.text('Charts', margin, cy);
-      cy += 20;
-
-      const imgWidth = pageWidth - margin * 2;
-      chartCanvases.forEach(({ canvas, label }) => {
-        const imgHeight = (canvas.height / canvas.width) * imgWidth;
-        if (cy + imgHeight + 14 > doc.internal.pageSize.getHeight() - margin) {
-          doc.addPage();
-          cy = margin;
-        }
-        doc.setFontSize(11);
-        doc.setFont(undefined, 'bold');
-        doc.text(label, margin, cy);
-        cy += 14;
-        const imgData = canvas.toDataURL('image/png', 1.0);
-        doc.addImage(imgData, 'PNG', margin, cy, imgWidth, imgHeight);
-        cy += imgHeight + 24;
-      });
-    }
 
     doc.save(`${currentChartAnalysis.ticker}_Chart_Analysis.pdf`);
   } finally {
