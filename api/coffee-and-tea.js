@@ -482,6 +482,12 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         model: 'claude-opus-5-5', // TEMPORARY TRIAL - was 'claude-sonnet-4-6'. Revert after testing.
         max_tokens: 32000,
+        // TEMPORARY TRIAL: default effort is "high" - real usage on the
+        // first two runs showed ~2,700-3,000 thinking tokens/session.
+        // Testing "medium" to see if it meaningfully cuts thinking-token
+        // cost while output quality holds up for this bounded, spec-
+        // driven task. Remove this whole output_config block on revert.
+        output_config: { effort: 'medium' },
         system: systemPrompt,
         messages: [
           { role: 'user', content: JSON.stringify(modelInput, null, 2) },
