@@ -21,7 +21,7 @@
 // timeouts. The model still chooses which strikes/structure to propose
 // (a genuine judgment call based on the GEX read) - it no longer prices
 // them.
-import { computeStrategyEconomics } from '../lib/options-pricing.js';
+import { computeStrategyEconomics, computeImpliedMove } from '../lib/options-pricing.js';
 
 // ---- Options expiration calendar facts (no API call - pure date math) ----
 // Kept local to this file rather than a shared lib, matching this repo's
@@ -559,10 +559,19 @@ export default async function handler(req, res) {
     // Force the server-determined IV into the response, overriding
     // whatever the model echoed - guarantees consistency with what was
     // actually used to price every strategy above, rather than trusting
-    // the model copied the provided value correctly.
+    // the model copied the provided value correctly. Also attaches the
+    // implied weekly move, computed the same way (see lib/options-
+    // pricing.js) - deterministic, added after the model responds, same
+    // pattern as everything else in this block.
     if (parsed.volatility_check) {
       parsed.volatility_check.iv_used_pct = ivUsedPct;
       parsed.volatility_check.iv_source = ivSource;
+      parsed.volatility_check.implied_move = computeImpliedMove({
+        spot,
+        ivUsedPct,
+        sessionDate: input.session_date,
+        expiration: input.expiration,
+      });
     }
 
     try {
