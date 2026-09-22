@@ -94,6 +94,16 @@ class MacroContext(BaseModel):
     per_strategy_guidance: list[PerStrategyGuidance] = Field(default_factory=list)
 
 
+class ImpliedMove(BaseModel):
+    expected_range_usd: dict[str, float]  # {"low": ..., "high": ...}
+    one_sigma_move_usd: float
+    one_sigma_move_pct: float
+    iv_used_pct: float
+    session_date: str
+    expiration: str
+    method: str
+
+
 class VolatilityCheck(BaseModel):
     realized_vol_10d_pct: float
     realized_vol_20d_pct: float
@@ -101,6 +111,11 @@ class VolatilityCheck(BaseModel):
     iv_source: Literal["tiger_underlying_iv", "user_assumed", "placeholder", "live_chain"]
     verdict: Literal["rich", "cheap", "fair"]
     strategy_tilt: str
+    # Optional + defaulted to None so a session run before this field
+    # existed (or any response missing it) still validates fine - this
+    # never becomes a hard requirement that could break re-rendering an
+    # older stored session.
+    implied_move: Optional[ImpliedMove] = None
 
 
 class WallCrossReference(BaseModel):
@@ -407,6 +422,12 @@ def build_vol_check(S, vc):
         f"<b>10-day RV: {vc.realized_vol_10d_pct:g}% &nbsp;&middot;&nbsp; "
         f"20-day RV: {vc.realized_vol_20d_pct:g}% &nbsp;&middot;&nbsp; "
         f"IV used: {vc.iv_used_pct:g}% ({vc.iv_source.replace('_', ' ')})</b>", BODY))
+    if vc.implied_move:
+        im = vc.implied_move
+        S.append(Paragraph(
+            f"<b>Implied weekly move (1&sigma;): "
+            f"${im.expected_range_usd['low']:.2f}&ndash;${im.expected_range_usd['high']:.2f} "
+            f"(&plusmn;{im.one_sigma_move_pct:g}%)</b>", BODY))
     S.append(Paragraph(f"<b>Verdict: {vc.verdict.upper()}.</b> {vc.strategy_tilt}", BODY))
     S.append(Spacer(1, 4))
 
