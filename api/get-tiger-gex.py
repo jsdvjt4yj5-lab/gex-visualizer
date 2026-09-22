@@ -446,6 +446,50 @@ def get_underlying_iv(quote_client, symbol):
     return HARD_FALLBACK_IV, "hard_fallback"
 
 
+def nearest_weekly_friday(today_date):
+    """Calendar-only approximation of 'this week's weekly options
+    expiration', for Chart Analysis's implied-move calc - the coming
+    Friday, or today if today itself is a Friday. Deliberately NOT a
+    live Tiger options-expirations lookup like the main GEX endpoint's
+    week_start/week_end aggregation elsewhere in this file (Chart
+    Analysis is kept free of live options-chain calls by design - see
+    CHART_ANALYSIS_SYSTEM_PROMPT: "no options/gamma data at all"), so
+    this is a best-effort calendar estimate, not a chain-verified date.
+    Good enough for framing an implied-move range on a price chart; not
+    a substitute for the real expiration used in the main GEX pull or
+    Coffee and Tea.
+    """
+    days_until_friday = (4 - today_date.weekday()) % 7  # Mon=0..Sun=6, Friday=4
+    return today_date + timedelta(days=days_until_friday)
+
+
+def compute_implied_move_1sigma(spot, iv, expiration_date_str, now_et):
+    """Implied 1-sigma move by expiration_date_str, via the standard
+    IV-formula method (spot * IV * sqrt(T)). Mirrors lib/options-
+    pricing.js's computeImpliedMove on the JS (Coffee and Tea) side,
+    but reuses THIS file's own years_to_expiry() (clock-based, to
+    4:00pm ET on the expiry date) rather than trying to share a T
+    calculation across runtimes - same duplicated-small-helper pattern
+    this codebase already uses elsewhere (see get-price-data.js's
+    comment on the Black-Scholes pricer being separately duplicated per
+    file/runtime, rather than shared). Never raises - spot/iv are
+    already validated by the time this is called.
+    """
+    t_years = years_to_expiry(expiration_date_str, now_et)
+    one_sigma = spot * iv * math.sqrt(t_years)
+    return {
+        "expected_range_usd": {
+            "low": round(spot - one_sigma, 2),
+            "high": round(spot + one_sigma, 2),
+        },
+        "one_sigma_move_usd": round(one_sigma, 2),
+        "one_sigma_move_pct": round((one_sigma / spot) * 100, 2) if spot else None,
+        "iv_used_pct": round(iv * 100, 2),
+        "expiration": expiration_date_str,
+        "method": "iv_formula_1sigma",
+    }
+
+
 # ---- Price-data mode: MA / volume-profile from Tiger's own bars, as a
 # real (documented, authenticated) alternative to the unofficial Yahoo
 # Finance endpoint get-price-data.js currently uses. Response shapes below
@@ -996,6 +1040,26 @@ def handle_chart_analysis(quote_client, symbol):
         else "12-month MA: not enough history yet"
     )
 
+    # Implied weekly move for the chart - reuses get_underlying_iv()
+    # (already called elsewhere in this file for the gamma calc) and
+    # nearest_weekly_friday() as a calendar-only stand-in for "this
+    # week's expiration" (see that function's docstring for why this
+    # doesn't do a live options-chain lookup the way the main GEX pull
+    # does). One extra Tiger API call per Chart Analysis click (get_
+    # option_analysis, via get_underlying_iv) - a different endpoint
+    # from the kline calls the day/week/month bars use, so it doesn't
+    # touch that separate quota. Never blocks the price-action read:
+    # get_underlying_iv() already falls back to HARD_FALLBACK_IV rather
+    # than raising if the call itself fails.
+    now_et_full = datetime.now(timezone.utc).astimezone(EASTERN)
+    implied_move_iv, implied_move_iv_source = get_underlying_iv(quote_client, symbol)
+    implied_move_expiration = nearest_weekly_friday(today_et)
+    implied_move = compute_implied_move_1sigma(
+        daily_closes[-1], implied_move_iv, implied_move_expiration.isoformat(), now_et_full
+    )
+    implied_move["iv_source"] = implied_move_iv_source
+    timeframes_meta["daily"]["implied_move"] = implied_move
+
     # Optional GEX confluence context - pulls the most recent stored GEX
     # snapshot for this ticker (if any) and surfaces its most notable
     # strikes to the model as reference only. This stays a nice-to-have:
@@ -1129,6 +1193,7 @@ def handle_chart_analysis(quote_client, symbol):
             "session_date": gex_snapshot.get("session_date"),
             "levels": notable_gex_levels,
         } if gex_snapshot else None,
+        "implied_move": implied_move,
         # Kept at top level too (daily values) for any caller still
         # reading the pre-multi-timeframe response shape.
         "bars_used": timeframes_meta["daily"]["bars_used"],

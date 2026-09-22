@@ -1121,6 +1121,23 @@ function renderChartAnalysisResult(data) {
   if (tf.daily?.bars?.length) {
     chartAnalysisDailySection.style.display = '';
     chartAnalysisDailyText.innerHTML = chartAnalysisMdToHtml(sections.daily);
+    // Same flat-dashed-line mechanism as the MA lines and gexRefLines
+    // above - no changes needed to renderChartAnalysisTimeframeChart
+    // itself, just two more entries in the refLines array it already
+    // accepts. Distinct violet color to stand apart from the existing
+    // orange/red MA lines and green/red GEX wall lines.
+    const impliedMoveRefLines = tf.daily.implied_move ? [
+      {
+        label: `Implied move high ($${tf.daily.implied_move.expected_range_usd.high.toFixed(2)})`,
+        value: tf.daily.implied_move.expected_range_usd.high,
+        color: '#a78bfa',
+      },
+      {
+        label: `Implied move low ($${tf.daily.implied_move.expected_range_usd.low.toFixed(2)})`,
+        value: tf.daily.implied_move.expected_range_usd.low,
+        color: '#a78bfa',
+      },
+    ] : [];
     chartAnalysisDailyChartInstance = renderChartAnalysisTimeframeChart(
       chartAnalysisDailyChartWrap, 'chartAnalysisDailyChart', chartAnalysisDailyChartInstance,
       tf.daily,
@@ -1128,6 +1145,7 @@ function renderChartAnalysisResult(data) {
         { label: '30-day MA', value: tf.daily.ma30, color: '#eda100' },
         { label: '200-day MA', value: tf.daily.ma200, color: '#e05252' },
         ...gexRefLines,
+        ...impliedMoveRefLines,
       ],
       'Daily'
     );
