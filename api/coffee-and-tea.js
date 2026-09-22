@@ -480,7 +480,7 @@ export default async function handler(req, res) {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
+        model: 'claude-opus-5-5', // TEMPORARY TRIAL - was 'claude-sonnet-4-6'. Revert after testing.
         max_tokens: 32000,
         system: systemPrompt,
         messages: [
