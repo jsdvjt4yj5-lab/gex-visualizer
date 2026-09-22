@@ -3246,6 +3246,7 @@ function renderCtOutput(o) {
   const vc = o.volatility_check;
   html += ctSection('Volatility Check', `
     <p>10d RV: ${vc.realized_vol_10d_pct}% · 20d RV: ${vc.realized_vol_20d_pct}% · IV used: ${vc.iv_used_pct}% (${vc.iv_source})</p>
+    ${vc.implied_move ? `<p>Implied weekly move (1σ): $${vc.implied_move.expected_range_usd.low.toFixed(2)}–$${vc.implied_move.expected_range_usd.high.toFixed(2)} (±${vc.implied_move.one_sigma_move_pct}%)</p>` : ''}
     <p><strong style="color:${vc.verdict === 'rich' ? '#e66767' : vc.verdict === 'cheap' ? '#199e70' : '#eda100'};">${vc.verdict.toUpperCase()}</strong> — ${vc.strategy_tilt}</p>
   `);
 
