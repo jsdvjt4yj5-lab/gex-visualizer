@@ -2989,6 +2989,14 @@ function buildGexDataFromCurrent(data) {
     ma200: data.movingAverages?.ma200 ?? null,
     walls,
     gamma_regime: hasFlipZone ? 'flip_zone_present' : 'uniform_positive',
+    // Only present when data came from a Tiger pull (get-tiger-gex.py) -
+    // screenshot-sourced snapshots (parse-gex.js) never have this, so
+    // coffee-and-tea.js's optional-chained read of underlying_iv_used_
+    // as_fallback safely falls through to the next IV tier when absent.
+    // Previously omitted here entirely, which meant the real-market-IV
+    // tier never fired through the UI even on Tiger-sourced sessions -
+    // every session silently used the user_assumed IV instead.
+    gamma_inputs: data.gamma_inputs ?? undefined,
   };
 }
 
