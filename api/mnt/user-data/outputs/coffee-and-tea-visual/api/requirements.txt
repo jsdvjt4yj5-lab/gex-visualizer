@@ -1,4 +1,0 @@
-tigeropen
-pydantic
-reportlab
-Pillow
