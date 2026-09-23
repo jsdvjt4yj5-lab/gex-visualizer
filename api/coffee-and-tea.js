@@ -259,6 +259,14 @@ risk structures that look tempting but fit today's gamma shape badly -
 e.g. selling premium into a negative-gamma pocket where hedging amplifies
 moves - each with a one-line reason. Empty array if nothing stands out.
 
+15. Sizing regime: the input's sizing_regime (regime, risk_budget_pct,
+reason) is already decided server-side and already applied to every
+strategy's size - do not change or restate sizes. Reflect it in the
+prose: in "high_vol" or "unknown", state lower confidence in the GEX read
+in market_structure.summary or strategy_tilt; in "calm", you may state
+the read is in the regime where it has historically been most reliable.
+Never imply walls will contain price in any regime.
+
 MANAGEMENT RULES:
 - GEX walls are "pay attention" lines, not hard floors/ceilings - they
   describe dealer hedging mechanics, not certainty.
@@ -414,7 +422,47 @@ function extractLastJSONObject(text) {
 
 const round2 = (x) => Math.round(x * 100) / 100;
 const ASSUMED_FALLBACK_IV_PCT = 13;
-const RISK_BUDGET_PCT = 5;
+// Regime-dependent risk budget (Sugar findings: the GEX signal is most
+// reliable in calm regimes, least in high-vol ones - Maurer 2026). Computed
+// here in code, not left to the model, so the regime actually changes
+// position size rather than just the prose. Tiers:
+//   20d realized vol > 20%  -> 2.5% per strategy (halved)
+//   20d realized vol <= 20% -> 5%   per strategy (full)
+//   realized vol missing    -> 2.5% per strategy (conservative default)
+// Threshold is deliberately a single, pre-specified number - not tuned to
+// results - so it can be tested honestly once graded sessions accumulate.
+const RISK_BUDGET_FULL_PCT = 5;
+const RISK_BUDGET_REDUCED_PCT = 2.5;
+const HIGH_VOL_RV20_THRESHOLD_PCT = 20;
+
+function regimeRiskBudget(rv20) {
+  const hasRv = typeof rv20 === 'number' && Number.isFinite(rv20) && rv20 > 0;
+  if (!hasRv) {
+    return {
+      regime: 'unknown',
+      realized_vol_20d_pct: null,
+      threshold_pct: HIGH_VOL_RV20_THRESHOLD_PCT,
+      risk_budget_pct: RISK_BUDGET_REDUCED_PCT,
+      reason: 'Realized vol not supplied - sizing defaulted down to the reduced budget.',
+    };
+  }
+  if (rv20 > HIGH_VOL_RV20_THRESHOLD_PCT) {
+    return {
+      regime: 'high_vol',
+      realized_vol_20d_pct: rv20,
+      threshold_pct: HIGH_VOL_RV20_THRESHOLD_PCT,
+      risk_budget_pct: RISK_BUDGET_REDUCED_PCT,
+      reason: `20d RV ${rv20}% is above ${HIGH_VOL_RV20_THRESHOLD_PCT}% - GEX read less reliable, size halved.`,
+    };
+  }
+  return {
+    regime: 'calm',
+    realized_vol_20d_pct: rv20,
+    threshold_pct: HIGH_VOL_RV20_THRESHOLD_PCT,
+    risk_budget_pct: RISK_BUDGET_FULL_PCT,
+    reason: `20d RV ${rv20}% is at or below ${HIGH_VOL_RV20_THRESHOLD_PCT}% - GEX read at its most reliable, full size.`,
+  };
+}
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -474,8 +522,10 @@ export default async function handler(req, res) {
       session_date: opexContextForDate(input.session_date, inputTicker),
       expiration: opexContextForDate(input.expiration, inputTicker),
     };
+    const sizingRegime = regimeRiskBudget(input.realized_vol_20d_pct);
     const modelInput = {
       ...input,
+      sizing_regime: sizingRegime,
       iv_used_pct: ivUsedPct,
       iv_source: ivSource,
       options_expiration_context: optionsExpirationContext,
@@ -552,7 +602,7 @@ export default async function handler(req, res) {
           sessionDate: input.session_date,
           expiration: input.expiration,
           portfolioSizeUsd: input.portfolio_size_usd,
-          riskBudgetPct: RISK_BUDGET_PCT,
+          riskBudgetPct: sizingRegime.risk_budget_pct,
         });
         return {
           name: s.name,
@@ -588,6 +638,9 @@ export default async function handler(req, res) {
         expiration: input.expiration,
       });
     }
+
+    // Server-determined, like iv_used_pct above - never taken from the model.
+    parsed.sizing_regime = sizingRegime;
 
     try {
       validateOutput(parsed);

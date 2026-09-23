@@ -232,6 +232,14 @@ class AvoidItem(BaseModel):
     reason: str
 
 
+class SizingRegime(BaseModel):
+    regime: Literal["calm", "high_vol", "unknown"]
+    realized_vol_20d_pct: Optional[float] = None
+    threshold_pct: float
+    risk_budget_pct: float
+    reason: str
+
+
 class ReasoningOutput(BaseModel):
     market_structure: MarketStructure
     macro_context: MacroContext
@@ -243,6 +251,9 @@ class ReasoningOutput(BaseModel):
     # Optional (v2 PDF layout) - structures that don't fit today's gamma
     # shape, with why. Defaulted so older stored sessions still validate.
     avoid: list[AvoidItem] = Field(default_factory=list)
+    # Server-computed in coffee-and-tea.js (regimeRiskBudget). Optional so
+    # sessions stored before regime sizing existed still render.
+    sizing_regime: Optional[SizingRegime] = None
 
     @model_validator(mode="after")
     def at_least_one_strategy(self):
@@ -530,7 +541,7 @@ def build_data_quality(S, output, ctx, data_quality):
         rows.append([_p("Realized vol (10d/20d)"),
                      _p("Not supplied" if rv_missing else
                         f"{ctx.get('realized_vol_10d_pct')}% / {ctx.get('realized_vol_20d_pct')}%"),
-                     _p("RV-vs-IV comparison and regime-confidence gating could not run."
+                     _p("RV-vs-IV comparison could not run; sizing defaults to the reduced budget."
                         if rv_missing else "Used for the vol check below.")])
         rows.append([_p("EOD flow"),
                      _p("Supplied" if ctx.get("flow_data") else "Not supplied"),
@@ -540,6 +551,12 @@ def build_data_quality(S, output, ctx, data_quality):
                      _p("Tiger pull" if ctx.get("chain_data_available") else "Screenshot / manual"),
                      _p("&mdash;" if ctx.get("chain_data_available") else
                         "Walls are only as accurate as the parsed screenshot.")])
+
+    sr = output.sizing_regime
+    if sr is not None:
+        label = {"calm": "Calm", "high_vol": "<b>High vol</b>", "unknown": "<b>Unknown</b>"}[sr.regime]
+        rows.append([_p("Sizing regime"), _p(f"{label} &mdash; {sr.risk_budget_pct:g}% risk per strategy"),
+                     _p(sr.reason)])
 
     live_liq = any(s.liquidity_check.status != "awaiting_live_chain" for s in output.strategies)
     rows.append([_p("Bid/ask"), _p("Checked" if live_liq else "Not available"),
