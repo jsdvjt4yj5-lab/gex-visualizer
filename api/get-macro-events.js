@@ -27,6 +27,12 @@ dates (inclusive). Categories to check, in order of importance:
 - US Treasury auctions or yield-relevant events (10Y/30Y auctions, refunding announcements)
 - BoJ policy decisions, yen-relevant events (USD/JPY intervention risk, BoJ speakers)
 
+Routine weekly releases count - e.g. initial jobless claims (Thursdays
+8:30 ET), housing starts, durable goods, consumer sentiment - as do
+scheduled Fed speeches by voters or the Chair/Vice Chair. A normal week
+almost always has at least one event; return [] only if you searched and
+genuinely found none.
+
 Only include events with a real, confirmed date within the window - do not
 guess or extrapolate a recurring event's date without verifying it via
 search. If nothing verifiable falls in the window, return an empty array
@@ -66,10 +72,13 @@ export default async function handler(req, res) {
         messages: [
           {
             role: 'user',
-            content: `Find macro calendar events between ${session_date} and ${expiration} (inclusive).`,
+            content: `Today is ${session_date}. Find US macro calendar events between ${session_date} and ${expiration} (inclusive). Search a weekly economic calendar for this specific week (e.g. "economic calendar week of <Monday's date>") rather than each event type separately.`,
           },
         ],
-        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+        // max_uses caps searches per call - the ~192K-token spike traced
+        // earlier came from 12 compounding searches in one request. A few-day
+        // window rarely needs more than 3-4.
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
       }),
     });
 

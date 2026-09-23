@@ -270,7 +270,7 @@
 <div class="controls" style="margin-top:12px;">
   <button id="ctRunBtn" disabled>Run Protocol Coffee and Tea</button>
   <button id="ctPdfBtn" disabled>Download session PDF</button>
-  <button id="ctRefreshMacroBtn" type="button" title="Force a fresh macro calendar search for this month, bypassing the cache">Refresh macro calendar</button>
+  <button id="ctRefreshMacroBtn" type="button" title="Clear cached macro events and search this session's window again">Refresh macro calendar</button>
 </div>
 
 <div class="status" id="ctStatus"></div>
@@ -3086,25 +3086,35 @@ async function fetchMacroEvents(sessionDate, expiration) {
   }
 }
 
-const MACRO_CACHE_PREFIX = 'macroEventsCache_'; // + "YYYY-MM"
+// Macro events are now fetched per SESSION WINDOW (session_date ->
+// expiration, usually 0-5 days) instead of once per calendar month.
+// Why: the month-wide search asked the model to find ~40 days of events in
+// one capped call, and it came back sparse - then that sparse (sometimes
+// empty) result was cached for the whole month, so later sessions saw
+// "No scheduled macro events" even in weeks with jobless claims, durable
+// goods and Fed speakers. A few-day window is a much easier, more reliable
+// search, and the backend now caps searches per call (max_uses) so cost
+// stays bounded.
+//
+// Caching rules:
+// - Non-empty results are cached per window for MACRO_WINDOW_TTL_MS.
+// - Empty results are NOT cached - an empty answer is far more likely to be
+//   a weak search than a genuinely empty week, so the next run retries.
+// - Failed fetches are never cached.
+const MACRO_WINDOW_CACHE_PREFIX = 'macroWindowCache_'; // + "<session>_<expiration>"
+const MACRO_LEGACY_MONTH_PREFIX = 'macroEventsCache_'; // old month cache - cleared on refresh
+const MACRO_WINDOW_TTL_MS = 12 * 60 * 60 * 1000;
 
-// Fetches the full month's macro calendar (plus a ~10-day buffer into the
-// next month, since a session's expiration can land just past month-end).
-// Only overwrites the cache when the fetch actually succeeded - a failed
-// or errored request must NOT be cached as "confirmed zero events",
-// otherwise one bad request poisons the whole month for every session
-// after it. A genuinely successful empty result (the model searched and
-// found nothing) is still cached as-is; that's a real answer, not a failure.
-async function fetchAndCacheMonth(monthKey) {
-  const [y, m] = monthKey.split('-').map(Number);
-  const monthStart = `${monthKey}-01`;
-  const monthEndDate = new Date(Date.UTC(y, m, 10));
-  const monthEnd = monthEndDate.toISOString().slice(0, 10);
+function macroWindowKey(sessionDate, expiration) {
+  return `${MACRO_WINDOW_CACHE_PREFIX}${sessionDate}_${expiration}`;
+}
 
-  const { ok, events } = await fetchMacroEvents(monthStart, monthEnd);
-  if (ok) {
+async function fetchAndCacheWindow(sessionDate, expiration) {
+  const { ok, events } = await fetchMacroEvents(sessionDate, expiration);
+  if (ok && events.length) {
     try {
-      localStorage.setItem(MACRO_CACHE_PREFIX + monthKey, JSON.stringify({ fetched_at: new Date().toISOString(), events }));
+      localStorage.setItem(macroWindowKey(sessionDate, expiration),
+        JSON.stringify({ fetched_at: new Date().toISOString(), events }));
     } catch (e) {
       // localStorage full/unavailable - fine, just won't cache this run
     }
@@ -3112,43 +3122,45 @@ async function fetchAndCacheMonth(monthKey) {
   return { ok, events };
 }
 
-// Runs the macro event search at most once per calendar month - on a
-// cache miss, fetches the whole month via fetchAndCacheMonth() above.
-// Every session that month then just filters the cached list down to its
-// own [session_date, expiration] window locally - no API call, no search
-// cost. Use the "Refresh macro calendar" button (refreshMacroCalendar())
-// if a new event gets announced mid-month and the cache needs updating
-// before the month rolls over.
 async function getMacroEventsForSession(sessionDate, expiration) {
-  const monthKey = sessionDate.slice(0, 7); // "YYYY-MM"
-  const cacheKey = MACRO_CACHE_PREFIX + monthKey;
-
-  let monthEvents;
-  const cached = localStorage.getItem(cacheKey);
-  if (cached) {
+  const raw = localStorage.getItem(macroWindowKey(sessionDate, expiration));
+  if (raw) {
     try {
-      monthEvents = JSON.parse(cached).events || [];
+      const cached = JSON.parse(raw);
+      const fresh = Date.now() - new Date(cached.fetched_at).getTime() < MACRO_WINDOW_TTL_MS;
+      if (fresh && Array.isArray(cached.events) && cached.events.length) {
+        return cached.events;
+      }
     } catch (e) {
-      monthEvents = null;
+      // corrupt entry - fall through to a fresh fetch
     }
   }
+  const { events } = await fetchAndCacheWindow(sessionDate, expiration);
+  return events.filter((ev) => ev.date >= sessionDate && ev.date <= expiration);
+}
 
-  if (!monthEvents) {
-    const result = await fetchAndCacheMonth(monthKey);
-    monthEvents = result.events; // if the fetch failed, this is [] and nothing was cached - next call retries
+function clearMacroCaches() {
+  const doomed = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && (k.startsWith(MACRO_WINDOW_CACHE_PREFIX) || k.startsWith(MACRO_LEGACY_MONTH_PREFIX))) doomed.push(k);
   }
-
-  return monthEvents.filter((ev) => ev.date >= sessionDate && ev.date <= expiration);
+  doomed.forEach((k) => localStorage.removeItem(k));
+  return doomed.length;
 }
 
 async function refreshMacroCalendar() {
-  const monthKey = todayEasternDateStr().slice(0, 7);
   ctRefreshMacroBtn.disabled = true;
-  setCtStatus('Refreshing macro calendar for ' + monthKey + '...');
+  const cleared = clearMacroCaches();
+  const sessionDate = todayEasternDateStr();
+  const expiration = currentData?.expiration && currentData.expiration >= sessionDate
+    ? currentData.expiration
+    : sessionDate;
+  setCtStatus(`Cleared ${cleared} cached macro entr${cleared === 1 ? 'y' : 'ies'}. Searching ${sessionDate} to ${expiration}...`);
   try {
-    const { ok, events } = await fetchAndCacheMonth(monthKey);
+    const { ok, events } = await fetchAndCacheWindow(sessionDate, expiration);
     if (ok) {
-      setCtStatus(`Macro calendar refreshed — ${events.length} event(s) found for ${monthKey}.`);
+      setCtStatus(`Macro calendar refreshed - ${events.length} event(s) found for ${sessionDate} to ${expiration}.`);
     } else {
       setCtStatus('Macro calendar refresh failed - the search request itself failed. Nothing was cached; try again.', true);
     }
