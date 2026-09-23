@@ -3,3 +3,4 @@
 .DS_Store
 *.patch
 Patches/
+__pycache__/
