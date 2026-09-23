@@ -605,9 +605,22 @@ export default async function handler(req, res) {
     try {
       assertStrategiesHaveLegs(parsed.strategies);
       parsed.strategies = parsed.strategies.map((s) => {
+        // Price each strategy where it would actually be ENTERED. A trade
+        // that only triggers at 779 priced at a 774 spot overstates/understates
+        // its credit, POP and exits. Uses the model's numeric entry_level when
+        // it's a plausible price (within MAX_ENTRY_DISTANCE_PCT of spot);
+        // otherwise falls back to spot and says so. Time-to-expiry is left at
+        // the session-time value - when the trigger will fire is unknown, so
+        // no extra decay is assumed (conservative for debits, slightly
+        // generous for credits entered later in the day).
+        const MAX_ENTRY_DISTANCE_PCT = 3;
+        const hasEntry = typeof s.entry_level === 'number' && Number.isFinite(s.entry_level) && s.entry_level > 0;
+        const entryPlausible = hasEntry && Math.abs(s.entry_level / spot - 1) * 100 <= MAX_ENTRY_DISTANCE_PCT;
+        const pricingSpot = entryPlausible ? s.entry_level : spot;
+        const pricedAt = entryPlausible ? 'entry_trigger' : (hasEntry ? 'spot_entry_implausible' : 'spot_no_entry_level');
         const econ = computeStrategyEconomics({
           legs: s.legs,
-          spot,
+          spot: pricingSpot,
           ivUsedPct,
           sessionDate: input.session_date,
           expiration: input.expiration,
@@ -619,7 +632,7 @@ export default async function handler(req, res) {
         // 50% target and price stop in underlying terms.
         const exitLevels = computeExitUnderlyingLevels({
           legs: s.legs,
-          spot,
+          spot: pricingSpot,
           ivUsedPct,
           sessionDate: input.session_date,
           expiration: input.expiration,
@@ -631,7 +644,7 @@ export default async function handler(req, res) {
           name: s.name,
           view: s.view,
           legs: s.legs,
-          pricing: econ.pricing,
+          pricing: { ...econ.pricing, priced_at: pricedAt, priced_at_underlying: Math.round(pricingSpot * 100) / 100 },
           sizing: econ.sizing,
           profit_target_50pct: {
             ...econ.profit_target_50pct,

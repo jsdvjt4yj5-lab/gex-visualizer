@@ -163,6 +163,10 @@ class Pricing(BaseModel):
     max_loss_per_contract_usd: float
     max_profit_per_contract_usd: Optional[float] = None  # may be "uncapped" for strangles
     pricing_source: Literal["black_scholes_estimate", "live_chain"]
+    # Where the strategy was priced (v3): at its entry trigger, or at spot
+    # with the reason. Optional so older stored sessions still validate.
+    priced_at: Optional[str] = None
+    priced_at_underlying: Optional[float] = None
 
 
 class Sizing(BaseModel):
@@ -770,7 +774,10 @@ def build_strategies(S, strategies, portfolio_size):
             _p(i), _p(s.name),
             _p(f"{_legs_short(s.legs)}<br/>exp <b>{_strategy_expiry_str(s.legs)}</b>"),
             _p(s.entry_trigger),
-            _p(f"${pr.amount_per_contract_usd / 100:.2f} {pr.credit_or_debit}"),
+            _p(f"${pr.amount_per_contract_usd / 100:.2f} {pr.credit_or_debit}"
+               + (f"<br/><font color='#777777' size='7'>@ SPY {pr.priced_at_underlying:g}"
+                  + ("" if pr.priced_at == "entry_trigger" else " (spot)") + "</font>"
+                  if pr.priced_at_underlying is not None else "")),
             _p(s.sizing.contracts),
             _p(_fmt_usd(s.sizing.total_max_loss_usd)),
             _p(_fmt_usd(s.sizing.total_max_profit_usd)),
@@ -780,8 +787,19 @@ def build_strategies(S, strategies, portfolio_size):
     S.append(_table(rows, [0.25*inch, 0.85*inch, 1.2*inch, 1.3*inch, 0.65*inch,
                            0.35*inch, 0.6*inch, 0.6*inch, 0.5*inch, 0.4*inch], font_size=8))
     if any(s.pricing.pricing_source != "live_chain" for s in ranked):
-        S.append(Paragraph("Priced at spot at session time (Black-Scholes estimate); a trigger-level "
-                           "entry will price differently.", NOTE))
+        at_spot = [s for s in ranked if s.pricing.priced_at not in (None, "entry_trigger")]
+        if any(s.pricing.priced_at == "entry_trigger" for s in ranked):
+            msg = ("Black-Scholes estimates, priced at each strategy's entry trigger (the SPY level under the price), "
+                   "with time-to-expiry at session time. Entered later in the day, credits will be a little smaller "
+                   "and debits a little cheaper.")
+            if at_spot:
+                msg += " Priced at spot instead (no usable entry level): " + ", ".join(f"#{ranked.index(s) + 1}" for s in at_spot) + "."
+        elif at_spot or any(s.pricing.priced_at is None for s in ranked):
+            msg = ("Priced at spot at session time (Black-Scholes estimate); a trigger-level entry will price differently.")
+        else:
+            msg = ""
+        if msg:
+            S.append(Paragraph(msg, NOTE))
     S.append(Spacer(1, 4))
     outer.append(KeepTogether(S))
 

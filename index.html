@@ -3336,7 +3336,7 @@ function renderCtOutput(o) {
     return `<div style="margin-top:12px; padding:10px; background:#1a1a1a; border-radius:6px;">
       <strong>${s.name}</strong> <span style="color:#999;">— ${s.view}</span>
       <p style="margin-top:4px; font-size:12.5px; color:#ccc;">${legsStr}</p>
-      <p style="margin-top:4px; font-size:12.5px;">${s.pricing.credit_or_debit} $${s.pricing.amount_per_contract_usd}/contract · max loss $${s.pricing.max_loss_per_contract_usd} · max profit ${s.pricing.max_profit_per_contract_usd ?? 'uncapped'} <span style="color:#666;">(${s.pricing.pricing_source})</span></p>
+      <p style="margin-top:4px; font-size:12.5px;">${s.pricing.credit_or_debit} $${s.pricing.amount_per_contract_usd}/contract · max loss $${s.pricing.max_loss_per_contract_usd} · max profit ${s.pricing.max_profit_per_contract_usd ?? 'uncapped'} <span style="color:#666;">(${s.pricing.pricing_source}${s.pricing.priced_at_underlying != null ? `, priced at SPY ${s.pricing.priced_at_underlying}${s.pricing.priced_at === 'entry_trigger' ? ' entry trigger' : ' spot'}` : ''})</span></p>
       <p style="margin-top:4px; font-size:12.5px;">Sizing: ${s.sizing.contracts} contracts (${s.sizing.risk_budget_pct}% risk budget) · total max loss $${s.sizing.total_max_loss_usd} · total max profit ${s.sizing.total_max_profit_usd ?? 'uncapped'}</p>
       <p style="margin-top:4px; font-size:12.5px; color:#199e70;">50% profit target: $${s.profit_target_50pct.trigger_price_usd} (${s.profit_target_50pct.est_path})</p>
       <p style="margin-top:4px; font-size:12.5px; color:#e66767;">Stop-loss: ${s.stop_loss.price_trigger_usd != null ? '$' + s.stop_loss.price_trigger_usd : 'monitor manually'} · structural: ${s.stop_loss.structural_trigger}</p>
