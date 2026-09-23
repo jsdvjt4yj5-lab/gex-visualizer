@@ -3153,7 +3153,9 @@ async function getMacroEventsForSession(sessionDate, expiration) {
   if (!monthEvents) monthEvents = (await fetchAndCacheMacroRange(from, through)).events;
   // Coffee and Tea's spec reasons about the holding window only - the rest
   // of the month stays cached for later sessions.
-  return monthEvents.filter((ev) => ev.date >= sessionDate && ev.date <= expiration);
+  // Overlap test, so a multi-day event already under way (e.g. a state
+  // visit that started yesterday) still counts for this session.
+  return monthEvents.filter((ev) => (ev.end_date || ev.date) >= sessionDate && ev.date <= expiration);
 }
 
 function clearMacroCaches() {

@@ -691,7 +691,13 @@ def build_macro_context(S, mc, ctx, session_date, expiration):
     if events:
         rows = [[_p("When (ET)", CELLH), _p("SGT", CELLH), _p("Event", CELLH), _p("Detail", CELLH)]]
         for ev in sorted(events, key=lambda e: (e.get("date") or "", e.get("time_et") or "99:99")):
-            rows.append([_p(_fmt_et(ev.get("date"), ev.get("time_et"))),
+            when = _fmt_et(ev.get("date"), ev.get("time_et"))
+            if ev.get("end_date"):
+                try:
+                    when += f"<br/>through {_dt.strptime(ev['end_date'], '%Y-%m-%d').strftime('%a %d %b')}"
+                except Exception:
+                    pass
+            rows.append([_p(when),
                          _p(_et_to_sgt(ev.get("date"), ev.get("time_et"))),
                          _p((ev.get("event") or "&mdash;") + _macro_source_tag(ev)),
                          _p(ev.get("detail") or "&mdash;")])

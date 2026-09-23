@@ -218,12 +218,22 @@ Include, when confirmed for a specific date in the window:
 - US political events with market relevance (shutdown deadlines, debt ceiling, major votes)
 - Treasury quarterly refunding announcements
 
-Run one or two searches for news/calendars covering this specific window.
+Search each of these separately (they rarely appear on the same page):
+1. Fed speakers scheduled this window
+2. Diplomatic/geopolitical events this window - state visits, summits,
+   leader meetings, trade talks, tariff deadlines
+3. Foreign central bank decisions this window
 Only include events with a real, confirmed date - never guess. Return []
 if you genuinely find none.
 
+Multi-day events (a 3-day state visit, a 2-day summit): set "date" to the
+FIRST day and "end_date" to the LAST day, and include the event if ANY of
+its days falls in the window - even if it started before the window. Put
+the market-relevant day (e.g. the summit meeting or state dinner) in
+"detail".
+
 Return ONLY a JSON array, no prose, no markdown fences:
-[{"event": string, "date": "YYYY-MM-DD", "time_et": "HH:MM" | null, "detail": string | null, "importance": "high"|"medium"|"low"}]`;
+[{"event": string, "date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD" | null, "time_et": "HH:MM" | null, "detail": string | null, "importance": "high"|"medium"|"low"}]`;
 
 function parseJsonArray(text) {
   const cleaned = (text || '').replace(/```json|```/g, '').trim();
@@ -252,7 +262,7 @@ async function fetchSearchEvents(start, end) {
         messages: [{ role: 'user', content: `Window: ${start} to ${searchEnd} (inclusive).` }],
         // Hard cap on searches per call - the earlier ~192K-token cost spike
         // came from 12 compounding searches in a single request.
-        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 4 }],
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
       }),
     });
     if (!r.ok) return { ok: false, events: [], window_end: searchEnd, error: `Anthropic HTTP ${r.status}` };
@@ -260,17 +270,30 @@ async function fetchSearchEvents(start, end) {
     const text = (j.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
     const arr = parseJsonArray(text);
     if (!arr) return { ok: false, events: [], window_end: searchEnd, error: 'Search did not return a JSON array' };
-    const events = arr
-      .filter((e) => e && e.event && /^\d{4}-\d{2}-\d{2}$/.test(e.date || '') && e.date >= start && e.date <= searchEnd)
-      .map((e) => ({
+    // Be lenient about date shape (the model sometimes writes a range like
+    // "2026-09-23 to 2026-09-25" in "date"), and keep multi-day events that
+    // OVERLAP the window rather than only ones that start inside it - the
+    // Xi state visit (Sep 23-25) was being lost to exactly these two checks.
+    const firstIso = (v) => (String(v || '').match(/\d{4}-\d{2}-\d{2}/g) || []);
+    let dropped = 0;
+    const events = [];
+    for (const e of arr) {
+      const dates = firstIso(e && e.date);
+      const date = dates[0];
+      const endDate = firstIso(e && e.end_date)[0] || dates[1] || null;
+      const lastDay = endDate && endDate > date ? endDate : date;
+      if (!e || !e.event || !date || lastDay < start || date > searchEnd) { dropped++; continue; }
+      events.push({
         event: String(e.event),
-        date: e.date,
+        date,
+        end_date: lastDay !== date ? lastDay : null,
         time_et: e.time_et || null,
         detail: e.detail || null,
         importance: ['high', 'medium', 'low'].includes(e.importance) ? e.importance : 'medium',
         source: 'search',
-      }));
-    return { ok: true, events, window_end: searchEnd };
+      });
+    }
+    return { ok: true, events, window_end: searchEnd, dropped };
   } catch (err) {
     return { ok: false, events: [], window_end: searchEnd, error: `Search failed: ${String(err)}` };
   }
@@ -321,7 +344,7 @@ export default async function handler(req, res) {
       fred: status(fred),
       fomc: { ...status(fomc), ...(fomc.stale_warning ? { warning: fomc.stale_warning } : {}) },
       treasury: status(treasury),
-      search: { ...status(search), window_end: search.window_end },
+      search: { ...status(search), window_end: search.window_end, dropped: search.dropped ?? 0 },
     },
   });
 }
