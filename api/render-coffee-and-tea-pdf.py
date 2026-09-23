@@ -176,12 +176,16 @@ class ProfitTarget(BaseModel):
     trigger_price_usd: float
     total_profit_usd: float
     est_path: str
+    # SPY levels where this option-price target triggers (solved at entry
+    # time-to-expiry). Optional so older stored sessions still validate.
+    underlying_levels: list[float] = Field(default_factory=list)
 
 
 class StopLoss(BaseModel):
     price_trigger_usd: Optional[float] = None  # null if "monitor manually"
     total_loss_at_stop_usd: Optional[float] = None
     structural_trigger: str
+    underlying_levels: list[float] = Field(default_factory=list)
 
 
 class LiquidityCheck(BaseModel):
@@ -792,11 +796,19 @@ def build_exits(S, strategies):
         verb_tp = "Buy back" if s.pricing.credit_or_debit == "credit" else "Sell"
         stop = (f"{verb_tp} at ~${sl.price_trigger_usd:.2f} (&minus;{_fmt_usd(sl.total_loss_at_stop_usd)})"
                 if sl.price_trigger_usd is not None else "Monitor manually")
+        if sl.underlying_levels:
+            stop += "<br/><font color='#777777'>&asymp; SPY " + " / ".join(f"{x:.2f}" for x in sl.underlying_levels) + "</font>"
+        pt_spy = ("<br/><font color='#777777'>&asymp; SPY " + " / ".join(f"{x:.2f}" for x in pt.underlying_levels)
+                  + " if reached soon</font>") if pt.underlying_levels else (
+            "<br/><font color='#777777'>No SPY level: reachable through time decay, not price</font>"
+            if s.pricing.credit_or_debit == "credit" else "")
         rows.append([_p(i),
                      _p(f"{verb_tp} at ~${pt.trigger_price_usd:.2f} (+{_fmt_usd(pt.total_profit_usd)})"
-                        f"<br/><font color='#777777'>{pt.est_path}</font>"),
+                        + pt_spy + f"<br/><font color='#777777'>{pt.est_path}</font>"),
                      _p(stop), _p(sl.structural_trigger)])
     S.append(_table(rows, [0.25*inch, 2.25*inch, 1.8*inch, 2.4*inch]))
+    S.append(Paragraph("SPY levels are solved at entry time with IV held constant. For credit spreads, time decay "
+                       "means the 50% target usually needs less of a move later; for debit spreads, more.", NOTE))
     S.append(Spacer(1, 4))
     outer.append(KeepTogether(S))
 

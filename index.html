@@ -3506,6 +3506,10 @@ function buildPineScript(output, input) {
     const tag = `S${i + 1} ${s.name}`;
     add('triggers', s.entry_level, `${tag} entry`, 'color.lime', 1, 'dashed');
     add('triggers', s.invalidation_level, `${tag} invalidation`, 'color.maroon', 1, 'dashed');
+    (s.profit_target_50pct?.underlying_levels || []).forEach((lv) =>
+      add('exits', lv, `${tag} 50% target (if hit soon)`, 'color.aqua', 1, 'dashed'));
+    (s.stop_loss?.underlying_levels || []).forEach((lv) =>
+      add('exits', lv, `${tag} price stop`, 'color.fuchsia', 1, 'dashed'));
     ctBreakeven(s).forEach((be) => add('strategies', be, `${tag} breakeven`, 'color.gray', 1, 'dotted'));
   });
 
@@ -3535,6 +3539,8 @@ function buildPineScript(output, input) {
     'color.silver': ['cImplied', 'color.rgb(158, 158, 158)', 'Implied range'],
     'color.lime':   ['cEntry',   'color.rgb(105, 240, 174)', 'Strategy entry'],
     'color.maroon': ['cInval',   'color.rgb(240, 98, 146)',  'Strategy invalidation'],
+    'color.aqua':   ['cTarget',  'color.rgb(0, 229, 255)',   'Strategy 50% target'],
+    'color.fuchsia':['cStopPx',  'color.rgb(255, 64, 129)',  'Strategy price stop'],
   };
   const usedColors = [];
   drawn.forEach((d) => {
@@ -3560,6 +3566,7 @@ function buildPineScript(output, input) {
     ['walls', 'GEX walls + flip', true],
     ['anchors', 'POC / VA / MAs', true],
     ['triggers', 'Strategy entry + invalidation', true],
+    ['exits', 'Strategy 50% target + price stop (SPY equiv.)', true],
     ['thesis', 'Thesis range + targets', true],
     ['implied', 'Implied 1-sigma range', false],
     ['strategies', 'Strategy breakevens', false],

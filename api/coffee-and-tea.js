@@ -21,7 +21,7 @@
 // timeouts. The model still chooses which strikes/structure to propose
 // (a genuine judgment call based on the GEX read) - it no longer prices
 // them.
-import { computeStrategyEconomics, computeImpliedMove } from '../lib/options-pricing.js';
+import { computeStrategyEconomics, computeImpliedMove, computeExitUnderlyingLevels } from '../lib/options-pricing.js';
 
 // ---- Options expiration calendar facts (no API call - pure date math) ----
 // Kept local to this file rather than a shared lib, matching this repo's
@@ -614,14 +614,35 @@ export default async function handler(req, res) {
           portfolioSizeUsd: input.portfolio_size_usd,
           riskBudgetPct: sizingRegime.risk_budget_pct,
         });
+        // SPY levels where the option-price exits would trigger (see lib for
+        // the timing assumption) - lets the chart overlay and PDF show the
+        // 50% target and price stop in underlying terms.
+        const exitLevels = computeExitUnderlyingLevels({
+          legs: s.legs,
+          spot,
+          ivUsedPct,
+          sessionDate: input.session_date,
+          expiration: input.expiration,
+          creditOrDebit: econ.pricing.credit_or_debit,
+          profitTriggerUsd: econ.profit_target_50pct.trigger_price_usd,
+          stopTriggerUsd: econ.stop_loss.price_trigger_usd,
+        });
         return {
           name: s.name,
           view: s.view,
           legs: s.legs,
           pricing: econ.pricing,
           sizing: econ.sizing,
-          profit_target_50pct: { ...econ.profit_target_50pct, est_path: s.profit_target_est_path },
-          stop_loss: { ...econ.stop_loss, structural_trigger: s.stop_loss_structural_trigger },
+          profit_target_50pct: {
+            ...econ.profit_target_50pct,
+            est_path: s.profit_target_est_path,
+            underlying_levels: exitLevels.profit_target,
+          },
+          stop_loss: {
+            ...econ.stop_loss,
+            structural_trigger: s.stop_loss_structural_trigger,
+            underlying_levels: exitLevels.stop,
+          },
           pop_pct: econ.pop_pct,
           entry_trigger: s.entry_trigger,
           // Numeric twins of the prose trigger fields, for chart overlays
