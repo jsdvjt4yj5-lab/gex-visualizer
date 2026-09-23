@@ -199,6 +199,10 @@ class Strategy(BaseModel):
     stop_loss: StopLoss
     pop_pct: Optional[float] = None  # null for calendars (not solvable)
     entry_trigger: str
+    # Numeric twins of the prose triggers, for chart overlays (TradingView
+    # export). Optional so older stored sessions still validate.
+    entry_level: Optional[float] = None
+    invalidation_level: Optional[float] = None
     liquidity_check: LiquidityCheck
 
     @model_validator(mode="after")

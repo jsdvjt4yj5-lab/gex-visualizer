@@ -270,6 +270,7 @@
 <div class="controls" style="margin-top:12px;">
   <button id="ctRunBtn" disabled>Run Protocol Coffee and Tea</button>
   <button id="ctPdfBtn" disabled>Download session PDF</button>
+  <button id="ctTvBtn" disabled title="Copy a TradingView Pine Script that draws this session's levels on your chart">Copy for TradingView</button>
   <button id="ctRefreshMacroBtn" type="button" title="Clear the cached macro calendar and fetch the rest of this month again">Refresh macro calendar</button>
 </div>
 
@@ -2973,6 +2974,7 @@ const ctRunBtn = document.getElementById('ctRunBtn');
 const ctFullSessionBtn = document.getElementById('ctFullSessionBtn');
 const ctRefreshMacroBtn = document.getElementById('ctRefreshMacroBtn');
 const ctPdfBtn = document.getElementById('ctPdfBtn');
+const ctTvBtn = document.getElementById('ctTvBtn');
 const ctStatusEl = document.getElementById('ctStatus');
 const ctOutput = document.getElementById('ctOutput');
 
@@ -3195,6 +3197,7 @@ async function runCoffeeAndTea() {
   ctRunBtn.disabled = true;
   ctOutput.innerHTML = '';
   ctPdfBtn.disabled = true;
+  ctTvBtn.disabled = true;
   setCtStatus('Assembling session data...');
 
   try {
@@ -3243,6 +3246,7 @@ async function runCoffeeAndTea() {
     currentCtOutput = output;
     renderCtOutput(output);
     ctPdfBtn.disabled = false;
+    ctTvBtn.disabled = false;
     setCtStatus(`Session complete — ${output.strategies.length} strategies generated. Building PDF...`);
 
     // Auto-generate the PDF right away, so pressing "Run Protocol Coffee
@@ -3424,8 +3428,161 @@ async function downloadCoffeeAndTeaPdf() {
   }
 }
 
+// ---------- TradingView export ----------
+// Builds a Pine Script (v6) indicator with this session's levels baked in.
+// TradingView scripts can't fetch from this app, so the levels are fixed at
+// copy time - paste once per session (Pine Editor -> paste -> Add to chart).
+// Lines use hline() (drawn once, never duplicated on realtime ticks);
+// labels use the delete-and-recreate-on-last-bar idiom. Each group has an
+// on/off toggle in the indicator's settings, so "everything" and "just
+// walls + triggers" are both one click away on the chart.
+function ctPineStr(t) {
+  return String(t).replace(/\\/g, '\\\\').replace(/"/g, "'").replace(/\n/g, ' ');
+}
+
+function ctBreakeven(s) {
+  const legs = s.legs || [];
+  const prem = (s.pricing?.amount_per_contract_usd || 0) / 100;
+  const credit = s.pricing?.credit_or_debit === 'credit';
+  const calls = legs.filter((l) => l.type === 'C');
+  const puts = legs.filter((l) => l.type === 'P');
+  if (legs.length === 2 && (calls.length === 2 || puts.length === 2)) {
+    const short = legs.find((l) => l.action === 'sell');
+    const long = legs.find((l) => l.action === 'buy');
+    if (!short || !long) return [];
+    const isCall = legs[0].type === 'C';
+    const base = credit ? short.strike : long.strike;
+    return [+(isCall ? base + prem : base - prem).toFixed(2)];
+  }
+  if (legs.length === 4 && calls.length === 2 && puts.length === 2 && credit) {
+    const sc = calls.find((l) => l.action === 'sell');
+    const sp = puts.find((l) => l.action === 'sell');
+    if (sc && sp) return [+(sp.strike - prem).toFixed(2), +(sc.strike + prem).toFixed(2)];
+  }
+  return [];
+}
+
+function buildPineScript(output, input) {
+  const ticker = (input?.ticker || 'SPY').toUpperCase();
+  const date = input?.session_date || todayEasternDateStr();
+  const gex = input?.gex_data || {};
+  const levels = []; // {group, price, text, color, width, style}
+  const add = (group, price, text, color, width = 1, style = 'solid') => {
+    if (typeof price === 'number' && Number.isFinite(price)) levels.push({ group, price: +price.toFixed(2), text, color, width, style });
+  };
+
+  // Walls + flip
+  (output.market_structure?.key_levels || []).forEach((l) => {
+    if (l.type === 'flip_zone') { add('walls', l.strike, `${l.strike} gamma flip`, 'color.orange', 1, 'dashed'); return; }
+    const g = l.gex_usd_m;
+    if (typeof g !== 'number') { add('walls', l.strike, `${l.strike} ${l.type}`, 'color.gray', 1, 'dotted'); return; }
+    const w = Math.abs(g) >= 250 ? 3 : Math.abs(g) >= 120 ? 2 : 1;
+    const sign = g >= 0 ? '+' : '-';
+    add('walls', l.strike, `${l.strike} ${sign}${Math.abs(g).toFixed(0)}M`, g >= 0 ? 'color.teal' : 'color.red', w);
+  });
+  // Price anchors
+  add('anchors', gex.poc, 'POC', 'color.purple', 1, 'solid');
+  add('anchors', gex.vah, 'VAH', 'color.purple', 1, 'dotted');
+  add('anchors', gex.val, 'VAL', 'color.purple', 1, 'dotted');
+  add('anchors', gex.ma30, 'MA30', 'color.gray', 1, 'dashed');
+  add('anchors', gex.ma200, 'MA200', 'color.gray', 2, 'dashed');
+  // Thesis
+  const th = output.trade_thesis || {};
+  const bcl = th.base_case_levels || [];
+  if (bcl.length >= 2) {
+    add('thesis', Math.min(...bcl), 'Base case low', 'color.blue', 1, 'dotted');
+    add('thesis', Math.max(...bcl), 'Base case high', 'color.blue', 1, 'dotted');
+  }
+  (th.upside_break?.target_levels || []).forEach((p) => add('thesis', p, `Upside target ${p}`, 'color.blue', 1, 'dashed'));
+  (th.downside_break?.target_levels || []).forEach((p) => add('thesis', p, `Downside target ${p}`, 'color.blue', 1, 'dashed'));
+  // Implied move
+  const im = output.volatility_check?.implied_move;
+  if (im?.expected_range_usd) {
+    add('implied', im.expected_range_usd.low, `Implied 1σ low`, 'color.silver', 1, 'dotted');
+    add('implied', im.expected_range_usd.high, `Implied 1σ high`, 'color.silver', 1, 'dotted');
+  }
+  // Strategy triggers + breakevens
+  (output.strategies || []).forEach((s, i) => {
+    const tag = `S${i + 1} ${s.name}`;
+    add('triggers', s.entry_level, `${tag} entry`, 'color.lime', 1, 'dashed');
+    add('triggers', s.invalidation_level, `${tag} invalidation`, 'color.maroon', 1, 'dashed');
+    ctBreakeven(s).forEach((be) => add('strategies', be, `${tag} breakeven`, 'color.gray', 1, 'dotted'));
+  });
+
+  // Merge labels that land on the same price within a group; keep the
+  // thickest line. Cap total lines well under Pine's per-script limits.
+  const merged = [];
+  levels.forEach((lv) => {
+    const hit = merged.find((m) => m.group === lv.group && m.price === lv.price);
+    if (hit) { hit.text += ' / ' + lv.text; hit.width = Math.max(hit.width, lv.width); }
+    else merged.push({ ...lv });
+  });
+  const MAX_LINES = 40;
+  const drawn = merged.slice(0, MAX_LINES);
+
+  const groups = [
+    ['walls', 'GEX walls + flip', true],
+    ['anchors', 'POC / VA / MAs', true],
+    ['triggers', 'Strategy entry + invalidation', true],
+    ['thesis', 'Thesis range + targets', true],
+    ['implied', 'Implied 1-sigma range', false],
+    ['strategies', 'Strategy breakevens', false],
+  ].filter(([g]) => drawn.some((d) => d.group === g));
+
+  const L = [];
+  L.push('//@version=6');
+  L.push(`// Protocol Coffee and Tea - ${ticker} ${date}. Generated by gex-visualizer.`);
+  L.push('// Levels are fixed at copy time. GEX walls are zones where dealer hedging tends to slow price, not levels that contain it.');
+  L.push(`indicator("C&T ${ticker} ${date}", overlay = true, max_labels_count = 100)`);
+  groups.forEach(([g, label, on]) => L.push(`show_${g} = input.bool(${on}, "${label}")`));
+  L.push('showLabels = input.bool(true, "Show labels")');
+  L.push('');
+  drawn.forEach((d) => {
+    L.push(`hline(${d.price}, "${ctPineStr(d.text)}", color = show_${d.group} ? ${d.color} : na, linestyle = hline.style_${d.style}, linewidth = ${d.width})`);
+  });
+  L.push('');
+  L.push('var label[] labs = array.new<label>()');
+  L.push('if barstate.islast');
+  L.push('    for l in labs');
+  L.push('        l.delete()');
+  L.push('    labs.clear()');
+  L.push('    if showLabels');
+  drawn.forEach((d) => {
+    L.push(`        if show_${d.group}`);
+    L.push(`            labs.push(label.new(bar_index + 3, ${d.price}, "${ctPineStr(d.text)}", style = label.style_label_left, color = color.new(${d.color}, 85), textcolor = ${d.color}, size = size.tiny))`);
+  });
+  L.push(`    if syminfo.ticker != "${ticker}"`);
+  L.push(`        labs.push(label.new(bar_index, high, "These levels are for ${ticker}", style = label.style_label_down, color = color.new(color.red, 20), textcolor = color.white))`);
+  return { script: L.join('\n'), lineCount: drawn.length, truncated: merged.length > drawn.length };
+}
+
+async function copyCoffeeAndTeaToTradingView() {
+  if (!currentCtOutput || !currentCtInput) return;
+  const { script, lineCount, truncated } = buildPineScript(currentCtOutput, currentCtInput);
+  const note = `${lineCount} level(s)${truncated ? ' (capped at 40)' : ''}. In TradingView: Pine Editor -> paste over everything -> Add to chart. Toggle groups in the indicator's settings.`;
+  try {
+    await navigator.clipboard.writeText(script);
+    setCtStatus('TradingView script copied - ' + note);
+  } catch (e) {
+    // Clipboard blocked (permissions / older browser): show it for manual copy.
+    let box = document.getElementById('ctTvScriptBox');
+    if (!box) {
+      box = document.createElement('textarea');
+      box.id = 'ctTvScriptBox';
+      box.readOnly = true;
+      box.style.cssText = 'width:100%; height:220px; margin-top:8px; font-family:monospace; font-size:12px;';
+      ctStatusEl.insertAdjacentElement('afterend', box);
+    }
+    box.value = script;
+    box.focus();
+    box.select();
+    setCtStatus('Clipboard blocked - script shown below, press Cmd+C to copy. ' + note);
+  }
+}
+
 ctRunBtn.addEventListener('click', runCoffeeAndTea);
 ctPdfBtn.addEventListener('click', downloadCoffeeAndTeaPdf);
+ctTvBtn.addEventListener('click', copyCoffeeAndTeaToTradingView);
 ctRefreshMacroBtn.addEventListener('click', refreshMacroCalendar);
 
 // ---- Strategy backtest (grading + weekly summary) ----

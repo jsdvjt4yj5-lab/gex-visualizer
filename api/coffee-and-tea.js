@@ -181,6 +181,14 @@ server-side - you're only providing this structural description. The
 structural trigger takes precedence over the price-based stop and can
 fire independently, even before the 50%-loss level is reached.
 
+8a. Numeric trigger levels (for chart overlays): alongside the prose
+entry_trigger and stop_loss_structural_trigger, set entry_level to the
+single underlying price the entry trigger refers to (e.g. 771.5 for
+"confirmed 5-min close below 771.50") and invalidation_level to the price
+in the structural trigger (e.g. 773 for "5-min close back above 773").
+Use null when a trigger isn't tied to one price (e.g. "enter before the
+event").
+
 8. Entry triggers:
 - Neutral/range strategies: near the center of the expected range
 - Single-sided credit spreads: on a pullback/pushback toward the short strike
@@ -302,6 +310,8 @@ prose, no markdown fences, no commentary outside the JSON:
     "profit_target_est_path": string,
     "stop_loss_structural_trigger": string,
     "entry_trigger": string,
+    "entry_level": number | null,
+    "invalidation_level": number | null,
     "liquidity_check": {"status": "awaiting_live_chain"|"green"|"yellow"|"red", "detail": string|null}
   }],
   "day_over_day_comparison": {"has_prior_snapshot": boolean, "changes": [{"metric": string, "prior": number|null, "current": number|null, "delta_note": string}]} | null,
@@ -614,6 +624,10 @@ export default async function handler(req, res) {
           stop_loss: { ...econ.stop_loss, structural_trigger: s.stop_loss_structural_trigger },
           pop_pct: econ.pop_pct,
           entry_trigger: s.entry_trigger,
+          // Numeric twins of the prose trigger fields, for chart overlays
+          // (TradingView export). Null when the trigger isn't a price level.
+          entry_level: typeof s.entry_level === 'number' ? s.entry_level : null,
+          invalidation_level: typeof s.invalidation_level === 'number' ? s.invalidation_level : null,
           liquidity_check: s.liquidity_check,
         };
       });
