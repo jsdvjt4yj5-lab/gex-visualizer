@@ -252,6 +252,13 @@ and just add length without changing what's actionable. Set
 has_prior_snapshot accordingly - if no prior snapshot was provided, set
 it false and leave changes empty rather than fabricating a comparison.
 
+14. Base-case range and avoid list (feed the PDF's thesis and "Avoid"
+sections): set trade_thesis.base_case_levels to the [low, high] range the
+base case expects to hold (two numbers). Fill "avoid" with 0-2 defined-
+risk structures that look tempting but fit today's gamma shape badly -
+e.g. selling premium into a negative-gamma pocket where hedging amplifies
+moves - each with a one-line reason. Empty array if nothing stands out.
+
 MANAGEMENT RULES:
 - GEX walls are "pay attention" lines, not hard floors/ceilings - they
   describe dealer hedging mechanics, not certainty.
@@ -266,7 +273,8 @@ response with any naked/uncovered leg will be rejected downstream.`;
 
 const OUTPUT_SCHEMA_NOTE = `Keep every text field short - hard limits, not suggestions:
 - "summary", "why_it_matters", "session_summary", "base_case", "profit_target_est_path", "strategy_tilt": 25 words max each
-- "significance", "detail", "guidance", "stop_loss_structural_trigger", "entry_trigger", "condition", "delta_note", "tension_or_alignment_note": 15 words max each
+- "significance", "detail", "guidance", "stop_loss_structural_trigger", "entry_trigger", "condition", "delta_note", "tension_or_alignment_note", "reason": 15 words max each
+- "structure": 8 words max
 These are real limits because this output has many nested sections and exactly
 3 full strategies - verbosity in any one field risks the whole response being
 cut off before it completes, which fails the entire session. A shorter,
@@ -279,7 +287,7 @@ prose, no markdown fences, no commentary outside the JSON:
   "macro_context": { "key_catalyst": string, "why_it_matters": string, "per_strategy_guidance": [{"strategy_type": string, "guidance": string}] },
   "volatility_check": { "realized_vol_10d_pct": number, "realized_vol_20d_pct": number, "iv_used_pct": number, "iv_source": "tiger_underlying_iv"|"user_assumed"|"placeholder"|"live_chain", "verdict": "rich"|"cheap"|"fair", "strategy_tilt": string },
   "eod_flow_context": { "session_summary": string, "wall_cross_references": [{"strike": number, "gex_confirms": boolean, "detail": string}], "standout_prints": [{"strike": number, "detail": string}], "tension_or_alignment_note": string } | null,
-  "trade_thesis": { "base_case": string, "upside_break": {"condition": string, "target_levels": [number]}, "downside_break": {"condition": string, "target_levels": [number]} },
+  "trade_thesis": { "base_case": string, "base_case_levels": [number], "upside_break": {"condition": string, "target_levels": [number]}, "downside_break": {"condition": string, "target_levels": [number]} },
   "strategies": [{
     "name": string, "view": string,
     "legs": [{"action": "buy"|"sell", "type": "C"|"P", "strike": number, "expiry": string}],
@@ -288,7 +296,8 @@ prose, no markdown fences, no commentary outside the JSON:
     "entry_trigger": string,
     "liquidity_check": {"status": "awaiting_live_chain"|"green"|"yellow"|"red", "detail": string|null}
   }],
-  "day_over_day_comparison": {"has_prior_snapshot": boolean, "changes": [{"metric": string, "prior": number|null, "current": number|null, "delta_note": string}]} | null
+  "day_over_day_comparison": {"has_prior_snapshot": boolean, "changes": [{"metric": string, "prior": number|null, "current": number|null, "delta_note": string}]} | null,
+  "avoid": [{"structure": string, "reason": string}]
 }`;
 
 // Guard before pricing: computeStrategyEconomics assumes non-empty legs,

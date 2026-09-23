@@ -143,6 +143,9 @@ class BreakScenario(BaseModel):
 
 class TradeThesis(BaseModel):
     base_case: str
+    # Optional (v2 PDF layout) - the range the base case expects to hold,
+    # e.g. [774, 780]. Defaulted so older stored sessions still validate.
+    base_case_levels: list[float] = Field(default_factory=list)
     upside_break: BreakScenario
     downside_break: BreakScenario
 
@@ -224,6 +227,11 @@ class DayOverDayComparison(BaseModel):
     changes: list[SnapshotChange] = Field(default_factory=list)
 
 
+class AvoidItem(BaseModel):
+    structure: str
+    reason: str
+
+
 class ReasoningOutput(BaseModel):
     market_structure: MarketStructure
     macro_context: MacroContext
@@ -232,6 +240,9 @@ class ReasoningOutput(BaseModel):
     trade_thesis: TradeThesis
     strategies: list[Strategy]
     day_over_day_comparison: Optional[DayOverDayComparison] = None
+    # Optional (v2 PDF layout) - structures that don't fit today's gamma
+    # shape, with why. Defaulted so older stored sessions still validate.
+    avoid: list[AvoidItem] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def at_least_one_strategy(self):
@@ -265,7 +276,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
-                                 TableStyle, HRFlowable, PageBreak, Image)
+                                 TableStyle, HRFlowable, PageBreak, Image, KeepTogether)
 import base64
 from io import BytesIO
 
@@ -335,6 +346,10 @@ BODY = ParagraphStyle('B', parent=ss['Normal'], fontSize=10, leading=14.5, space
 BULLET = ParagraphStyle('BU', parent=BODY, leftIndent=16, bulletIndent=5, spaceAfter=4)
 CELL = ParagraphStyle('C', parent=ss['Normal'], fontSize=8.5, leading=11.5)
 CELLB = ParagraphStyle('CB', parent=CELL, fontName='Helvetica-Bold')
+# White bold for header rows - CELLB's default black text was hard to read
+# on the green header background (TEXTCOLOR in TableStyle doesn't reach
+# into Paragraph cells).
+CELLH = ParagraphStyle('CH', parent=CELLB, textColor=colors.white)
 NOTE = ParagraphStyle('N', parent=ss['Normal'], fontSize=8.5, leading=11.5,
                        textColor=colors.HexColor('#777777'))
 
@@ -386,180 +401,390 @@ def _strategy_expiry_str(legs) -> str:
 
 
 # ---------- section builders ----------
+#
+# v2 layout (Sept 2026): mirrors the hand-built chat session PDF rather
+# than the earlier "narrative up top, tables in appendices" structure.
+# Changes vs v1:
+#   - Data-quality table first (IV source, RV, flow, chain, day-over-day
+#     staleness, Tiger data_quality warnings) so every caveat is visible
+#     before any number is read.
+#   - Day-over-day moved up from Appendix C into the main flow.
+#   - Sections with no data render an explicit placeholder instead of
+#     being silently skipped (EOD flow, RV, liquidity).
+#   - Macro events as a table with ET and SGT times.
+#   - Thesis as a scenario table.
+#   - One strategy table ranked by POP (highest first), with strikes,
+#     expiry, entry trigger, price, size, risk, gain and breakeven.
+#   - Separate exits table: 50% target / 50%-max-loss stop / structural
+#     invalidation (which takes precedence).
+#   - Optional "Avoid" section.
+# Everything below is display-only: nothing here recomputes pricing,
+# sizing or POP - those still come from lib/options-pricing.js via
+# coffee-and-tea.js. Breakeven is the one derived number, computed from
+# the already-priced net premium and the legs.
+
+from datetime import datetime as _dt
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _ET = _ZoneInfo("America/New_York")
+    _SGT = _ZoneInfo("Asia/Singapore")
+except Exception:  # tz database unavailable - SGT column just shows a dash
+    _ET = _SGT = None
+
+
+def _h(num, title):
+    return Paragraph(f"{num}. {title}" if num else title, H1)
+
+
+def _placeholder(S, text):
+    S.append(Paragraph(f"<i>Placeholder: {text}</i>", BODY))
+
+
+def _et_to_sgt(date_str, time_et):
+    """'2026-09-24', '08:30' (ET) -> 'Thu 8:30 PM SGT'. Best-effort."""
+    if not (_ET and date_str and time_et):
+        return "&mdash;"
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %I:%M %p", "%Y-%m-%d %I:%M%p"):
+        try:
+            et = _dt.strptime(f"{date_str} {time_et.strip()}", fmt).replace(tzinfo=_ET)
+            sg = et.astimezone(_SGT)
+            return sg.strftime("%a %-I:%M %p SGT")
+        except ValueError:
+            continue
+    return "&mdash;"
+
+
+def _fmt_et(date_str, time_et):
+    try:
+        d = _dt.strptime(date_str, "%Y-%m-%d").strftime("%a %d %b")
+    except Exception:
+        d = date_str or "&mdash;"
+    return f"{d}, {time_et} ET" if time_et else f"{d} (time TBC)"
+
+
+def _breakevens(strategy):
+    """Expiry breakeven(s) from legs + net premium, for the standard
+    verticals and iron condors/butterflies this workflow allows. Returns a
+    display string, or an em dash for anything else (e.g. a strangle, where
+    it's still computable but less standard - kept conservative)."""
+    legs = strategy.legs
+    prem = strategy.pricing.amount_per_contract_usd / 100.0
+    credit = strategy.pricing.credit_or_debit == "credit"
+    calls = [l for l in legs if l.type == "C"]
+    puts = [l for l in legs if l.type == "P"]
+    try:
+        if len(legs) == 2 and (len(calls) == 2 or len(puts) == 2):
+            short = next(l for l in legs if l.action == "sell")
+            long_ = next(l for l in legs if l.action == "buy")
+            is_call = legs[0].type == "C"
+            if credit:
+                be = short.strike + prem if is_call else short.strike - prem
+            else:
+                be = long_.strike + prem if is_call else long_.strike - prem
+            return f"{be:.2f}"
+        if len(legs) == 4 and len(calls) == 2 and len(puts) == 2 and credit:
+            sc = next(l for l in calls if l.action == "sell")
+            sp = next(l for l in puts if l.action == "sell")
+            return f"{sp.strike - prem:.2f} / {sc.strike + prem:.2f}"
+    except StopIteration:
+        pass
+    return "&mdash;"
+
+
+def _legs_short(legs):
+    return " / ".join(f"{l.action.title()} {l.strike:g}{l.type}" for l in legs)
+
+
+def _ranked(strategies):
+    # Highest POP first; strategies without a POP (not solvable) go last.
+    return sorted(strategies, key=lambda s: (s.pop_pct is None, -(s.pop_pct or 0)))
+
 
 def build_header(S, session_date, expiration, portfolio_size, spot):
     S.append(Paragraph("Protocol Coffee and Tea &mdash; SPY", TITLE))
     S.append(Paragraph(
         f"{session_date} &nbsp;&middot;&nbsp; exp {expiration} &nbsp;&middot;&nbsp; "
         f"portfolio ${portfolio_size:,.0f} &nbsp;&middot;&nbsp; spot ${spot:g}", SUB))
-    S.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#DDDDDD'), spaceAfter=10))
+    S.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#DDDDDD'), spaceAfter=6))
 
 
-def build_market_structure(S, ms):
-    S.append(Paragraph("1. Market Structure Read", H1))
+def build_data_quality(S, output, ctx, data_quality):
+    """Every caveat in one place, before any number. Built only from what
+    the session actually had - never guesses at a status."""
+    vc = output.volatility_check
+    rows = [[_p("Item", CELLH), _p("Status", CELLH), _p("Impact", CELLH)]]
+
+    iv_label = {
+        "live_chain": "Live chain IV",
+        "tiger_underlying_iv": "Tiger underlying 30-day IV (flat, no skew)",
+        "user_assumed": "User-assumed IV",
+        "placeholder": "Hardcoded placeholder IV",
+    }.get(vc.iv_source, vc.iv_source)
+    iv_impact = ("Pricing reflects the live chain." if vc.iv_source == "live_chain" else
+                 "All premiums, breakevens and POPs are Black-Scholes estimates at this IV. "
+                 "Re-price off the live chain before entry.")
+    rows.append([_p("Implied vol"), _p(f"<b>{vc.iv_used_pct:g}%</b> &mdash; {iv_label}"), _p(iv_impact)])
+
+    if ctx is not None:
+        rv_missing = ctx.get("realized_vol_20d_pct") is None
+        rows.append([_p("Realized vol (10d/20d)"),
+                     _p("Not supplied" if rv_missing else
+                        f"{ctx.get('realized_vol_10d_pct')}% / {ctx.get('realized_vol_20d_pct')}%"),
+                     _p("RV-vs-IV comparison and regime-confidence gating could not run."
+                        if rv_missing else "Used for the vol check below.")])
+        rows.append([_p("EOD flow"),
+                     _p("Supplied" if ctx.get("flow_data") else "Not supplied"),
+                     _p("Used in EOD Flow Context." if ctx.get("flow_data") else
+                        "EOD Flow Context is a placeholder; fresh vs. stale OI can't be separated.")])
+        rows.append([_p("Chain source"),
+                     _p("Tiger pull" if ctx.get("chain_data_available") else "Screenshot / manual"),
+                     _p("&mdash;" if ctx.get("chain_data_available") else
+                        "Walls are only as accurate as the parsed screenshot.")])
+
+    live_liq = any(s.liquidity_check.status != "awaiting_live_chain" for s in output.strategies)
+    rows.append([_p("Bid/ask"), _p("Checked" if live_liq else "Not available"),
+                 _p("See Liquidity section." if live_liq else "Liquidity check is a placeholder.")])
+
+    stale = _prior_staleness_days(ctx)
+    if stale is not None and stale > 3:
+        rows.append([_p("Prior snapshot"), _p(f"{stale} days old"),
+                     _p("Day-over-day is a direction-of-change read, not like-for-like.")])
+
+    if isinstance(data_quality, dict):
+        for key, check in data_quality.items():
+            if isinstance(check, dict) and check.get("status") == "warn":
+                rows.append([_p(f"Tiger: {key.replace('_', ' ')}"), _p("<b>WARN</b>"),
+                             _p(check.get("detail") or "&mdash;")])
+
+    S.append(Paragraph("Data quality notes", H1))
+    S.append(_table(rows, [1.35*inch, 2.0*inch, 3.35*inch]))
+    S.append(Spacer(1, 4))
+
+
+def _prior_staleness_days(ctx):
+    if not ctx:
+        return None
+    prior = ctx.get("prior_snapshot") or {}
+    cap = prior.get("captured_at")
+    sd = ctx.get("session_date")
+    if not (cap and sd):
+        return None
+    try:
+        cap_date = _dt.fromisoformat(cap.replace("Z", "+00:00"))
+        if _ET and cap_date.tzinfo:
+            cap_date = cap_date.astimezone(_ET)
+        return (_dt.strptime(sd, "%Y-%m-%d").date() - cap_date.date()).days
+    except Exception:
+        return None
+
+
+def build_market_structure(S, ms, spot):
+    S.append(_h(1, "Market Structure Read"))
     S.append(Paragraph(ms.summary, BODY))
     if ms.key_levels:
-        rows = [[_p("Level", CELLB), _p("Type", CELLB), _p("GEX Size", CELLB), _p("Significance", CELLB)]]
-        for lvl in ms.key_levels:
-            gex = f"${lvl.gex_usd_m:.1f}M" if lvl.gex_usd_m is not None else "&mdash;"
-            rows.append([_p(f"{lvl.strike:g}"), _p(lvl.type), _p(gex), _p(lvl.significance)])
-        S.append(_table(rows, [0.85*inch, 1.3*inch, 0.9*inch, 3.2*inch]))
-    S.append(Spacer(1, 4))
-
-
-def build_macro_context(S, mc):
-    S.append(Paragraph("1a. Macro Context", H1))
-    S.append(Paragraph(f"<b>{mc.key_catalyst}</b>", BODY))
-    S.append(Paragraph(mc.why_it_matters, BODY))
-    for g in mc.per_strategy_guidance:
-        S.append(Paragraph(f"<b>{g.strategy_type}:</b> {g.guidance}", BULLET, bulletText='\u2022'))
-    S.append(Spacer(1, 4))
-
-
-def build_vol_check(S, vc):
-    S.append(Paragraph("1b. Volatility Check", H1))
+        rows = [[_p("Level", CELLH), _p("Type", CELLH), _p("GEX Size", CELLH), _p("Read", CELLH)]]
+        levels = sorted(ms.key_levels, key=lambda l: -l.strike)
+        spot_row = None
+        for lvl in levels:
+            if spot_row is None and lvl.strike < spot:
+                rows.append([_p(f"<b>{spot:g}</b>"), _p("<b>spot</b>"), _p("&mdash;"), _p("Current price")])
+                spot_row = len(rows) - 1
+            gex = (("&minus;" if lvl.gex_usd_m < 0 else "") + f"${abs(lvl.gex_usd_m):.1f}M"
+                   if lvl.gex_usd_m is not None else "&mdash;")
+            rows.append([_p(f"{lvl.strike:g}"), _p(lvl.type.replace('_', ' ')), _p(gex), _p(lvl.significance)])
+        t = _table(rows, [0.75*inch, 1.05*inch, 0.95*inch, 3.95*inch])
+        if spot_row is not None:
+            t.setStyle(TableStyle([('BACKGROUND', (0, spot_row), (-1, spot_row), colors.HexColor('#FFF4D6'))]))
+        S.append(t)
     S.append(Paragraph(
-        f"<b>10-day RV: {vc.realized_vol_10d_pct:g}% &nbsp;&middot;&nbsp; "
-        f"20-day RV: {vc.realized_vol_20d_pct:g}% &nbsp;&middot;&nbsp; "
-        f"IV used: {vc.iv_used_pct:g}% ({vc.iv_source.replace('_', ' ')})</b>", BODY))
-    if vc.implied_move:
-        im = vc.implied_move
-        S.append(Paragraph(
-            f"<b>Implied weekly move (1&sigma;): "
-            f"${im.expected_range_usd['low']:.2f}&ndash;${im.expected_range_usd['high']:.2f} "
-            f"(&plusmn;{im.one_sigma_move_pct:g}%)</b>", BODY))
-    S.append(Paragraph(f"<b>Verdict: {vc.verdict.upper()}.</b> {vc.strategy_tilt}", BODY))
+        "Walls are zones where dealer hedging tends to slow price, not levels that contain it.", NOTE))
     S.append(Spacer(1, 4))
 
 
-def build_flow_context(S, fc):
-    if fc is None:
-        return
-    S.append(Paragraph("1c. EOD Flow Context", H1))
-    S.append(Paragraph(fc.session_summary, BODY))
-    if fc.wall_cross_references:
-        rows = [[_p("Strike", CELLB), _p("GEX Confirms?", CELLB), _p("Detail", CELLB)]]
-        for w in fc.wall_cross_references:
-            rows.append([_p(f"{w.strike:g}"), _p("Yes" if w.gex_confirms else "No"), _p(w.detail)])
-        S.append(_table(rows, [0.7*inch, 1.1*inch, 4.4*inch]))
-        S.append(Spacer(1, 6))
-    for sp in fc.standout_prints:
-        S.append(Paragraph(f"<b>Standout ({sp.strike:g}):</b> {sp.detail}", BODY))
-    S.append(Paragraph(fc.tension_or_alignment_note, BODY))
-    S.append(Spacer(1, 4))
-
-
-def build_standalone_flow_analysis(S, text):
-    """
-    The separate, full-prose EOD Flow Analysis (from the app's standalone
-    Flow Analyst feature, generated from the raw Bullflow Collections CSV)
-    - distinct from build_flow_context above, which is Coffee and Tea's
-    own condensed cross-reference derived from the same underlying
-    flow_data. Both are useful: this one is the fuller independent read,
-    the other integrates it directly against the GEX walls. Only appears
-    if a standalone flow analysis was actually generated in this session.
-    """
-    if not text:
-        return
-    S.append(Paragraph("1d. EOD Flow Analysis (full)", H1))
-    for paragraph in text.split("\n\n"):
-        if paragraph.strip():
-            S.append(Paragraph(paragraph.strip(), BODY))
-    S.append(Spacer(1, 4))
-
-
-def build_thesis(S, thesis):
-    S.append(Paragraph("2. Trade Thesis", H1))
-    S.append(Paragraph(f"<b>Base case:</b> {thesis.base_case}", BULLET, bulletText='\u2022'))
-    ub = thesis.upside_break
-    S.append(Paragraph(
-        f"<b>Upside break:</b> {ub.condition} &rarr; {', '.join(str(t) for t in ub.target_levels)}",
-        BULLET, bulletText='\u2022'))
-    db = thesis.downside_break
-    S.append(Paragraph(
-        f"<b>Downside break:</b> {db.condition} &rarr; {', '.join(str(t) for t in db.target_levels)}",
-        BULLET, bulletText='\u2022'))
-    S.append(Spacer(1, 4))
-
-
-def build_strategy_comparison(S, strategies):
-    S.append(PageBreak())
-    S.append(Paragraph("Appendix A: Strategy Comparison", H1))
-    rows = [[_p("Strategy", CELLB), _p("Legs", CELLB), _p("Pricing", CELLB), _p("Entry Trigger", CELLB)]]
-    for s in strategies:
-        price = s.pricing
-        price_str = (f"{price.credit_or_debit} ${price.amount_per_contract_usd:g}/ct &mdash; "
-                     f"max loss ${price.max_loss_per_contract_usd:g}")
-        rows.append([_p(s.name), _p(_legs_str(s.legs)), _p(price_str), _p(s.entry_trigger)])
-    S.append(_table(rows, [1.1*inch, 2.0*inch, 1.6*inch, 1.5*inch]))
-    S.append(Spacer(1, 4))
-
-
-def build_sizing(S, strategies):
-    S.append(Paragraph("Appendix B: Position Sizing, Profit Targets &amp; Stop-Losses", H1))
-    rows = [[_p("Strategy", CELLB), _p("Expiry", CELLB), _p("Contracts", CELLB), _p("Max Loss", CELLB),
-             _p("Max Profit", CELLB), _p("50% Target", CELLB), _p("Stop-Loss", CELLB), _p("POP", CELLB)]]
-    for s in strategies:
-        sizing = s.sizing
-        pt = s.profit_target_50pct
-        sl = s.stop_loss
-        pop_str = f"{s.pop_pct:g}%" if s.pop_pct is not None else "&mdash;"
-        rows.append([
-            _p(s.name),
-            _p(_strategy_expiry_str(s.legs)),
-            _p(sizing.contracts),
-            _p(_fmt_usd(sizing.total_max_loss_usd)),
-            _p(_fmt_usd(sizing.total_max_profit_usd)),
-            _p(_fmt_usd(pt.total_profit_usd)),
-            _p(_fmt_usd(sl.total_loss_at_stop_usd, allow_none="Monitor manually")),
-            _p(pop_str),
-        ])
-    S.append(_table(rows, [0.85*inch, 0.7*inch, 0.5*inch, 0.7*inch, 0.7*inch, 0.65*inch, 0.9*inch, 0.5*inch]))
-    S.append(Spacer(1, 6))
-    for s in strategies:
-        S.append(Paragraph(
-            f"<b>{s.name} stop-loss trigger:</b> {s.stop_loss.structural_trigger}", NOTE))
-    S.append(Spacer(1, 4))
-
-
-def build_day_over_day(S, dod):
+def build_day_over_day(S, dod, ctx):
+    S.append(_h(2, "Day-over-Day Comparison"))
     if dod is None or not dod.has_prior_snapshot:
+        _placeholder(S, "no prior snapshot available for comparison.")
         return
-    S.append(Paragraph("Appendix C: Day-over-Day Comparison", H1))
+    stale = _prior_staleness_days(ctx)
+    if stale is not None and stale > 3:
+        S.append(Paragraph(
+            f"Prior snapshot is <b>{stale} days old</b>; walls may sit on expiries that have since "
+            f"rolled off. Treat this as direction of change, not a like-for-like diff.", BODY))
     if dod.changes:
-        # A session can carry 8-9+ wall-level rows here, most of which
-        # barely moved and just add length without changing what's worth
-        # acting on. Always keep the headline context (spot, gamma_regime),
-        # and for the rest, only show walls that moved meaningfully,
-        # capped at the largest few moves - full data still lives in D1
-        # if a deeper look is ever needed.
-        HEADLINE_METRICS = {"spot", "gamma_regime"}
+        # Spot/regime and the price anchors (POC/VA/MAs) always show - the
+        # spec asks the model to include them regardless of size, and v1's
+        # $50M wall filter was silently dropping them. Walls keep v1's
+        # rule: >= $50M change, largest 5.
+        HEADLINE_METRICS = {"spot", "gamma_regime", "gamma regime", "poc", "vah", "val", "ma30", "ma200"}
         WALL_CHANGE_THRESHOLD_USD_M = 50
         MAX_WALL_ROWS = 5
-
-        headline = [c for c in dod.changes if c.metric in HEADLINE_METRICS]
-        wall_changes = [c for c in dod.changes if c.metric not in HEADLINE_METRICS]
+        headline = [c for c in dod.changes if c.metric.lower() in HEADLINE_METRICS]
+        wall_changes = [c for c in dod.changes if c.metric.lower() not in HEADLINE_METRICS]
 
         def _magnitude(c):
             if c.prior is None or c.current is None:
                 return 0
             return abs(c.current - c.prior)
 
-        significant_walls = sorted(
-            [c for c in wall_changes if _magnitude(c) >= WALL_CHANGE_THRESHOLD_USD_M],
-            key=_magnitude, reverse=True,
-        )
-        shown_walls = significant_walls[:MAX_WALL_ROWS]
-        omitted_count = len(wall_changes) - len(shown_walls)
-
-        rows = [[_p("Metric", CELLB), _p("Prior", CELLB), _p("Current", CELLB), _p("Note", CELLB)]]
-        for c in headline + shown_walls:
+        shown = sorted([c for c in wall_changes if _magnitude(c) >= WALL_CHANGE_THRESHOLD_USD_M],
+                       key=_magnitude, reverse=True)[:MAX_WALL_ROWS]
+        omitted = len(wall_changes) - len(shown)
+        rows = [[_p("Metric", CELLH), _p("Prior", CELLH), _p("Current", CELLH), _p("Change", CELLH)]]
+        for c in headline + shown:
             rows.append([_p(c.metric), _p(c.prior if c.prior is not None else "&mdash;"),
                          _p(c.current if c.current is not None else "&mdash;"), _p(c.delta_note)])
-        S.append(_table(rows, [1.3*inch, 0.8*inch, 0.8*inch, 3.3*inch]))
-        if omitted_count > 0:
-            S.append(Paragraph(
-                f"{omitted_count} additional wall level(s) with smaller changes omitted for brevity.", NOTE))
+        S.append(_table(rows, [1.4*inch, 1.0*inch, 1.0*inch, 3.3*inch]))
+        if omitted > 0:
+            S.append(Paragraph(f"{omitted} smaller wall change(s) omitted.", NOTE))
+    S.append(Spacer(1, 4))
+
+
+def build_flow_context(S, fc):
+    S.append(_h(3, "EOD Flow Context"))
+    if fc is None:
+        _placeholder(S, "prior-day EOD flow not supplied for this session.")
+        return
+    S.append(Paragraph(fc.session_summary, BODY))
+    if fc.wall_cross_references:
+        rows = [[_p("Strike", CELLH), _p("Flow vs GEX", CELLH), _p("Detail", CELLH)]]
+        for w in fc.wall_cross_references:
+            rows.append([_p(f"{w.strike:g}"), _p("Reinforces" if w.gex_confirms else "Contradicts"), _p(w.detail)])
+        S.append(_table(rows, [0.75*inch, 1.1*inch, 4.85*inch]))
+        S.append(Spacer(1, 6))
+    for sp in fc.standout_prints:
+        S.append(Paragraph(f"<b>Standout ({sp.strike:g}):</b> {sp.detail}", BODY))
+    S.append(Paragraph(f"<b>Verdict:</b> {fc.tension_or_alignment_note}", BODY))
+    S.append(Spacer(1, 4))
+
+
+def build_macro_context(S, mc, ctx, session_date, expiration):
+    S.append(_h(4, f"Macro Context (holding window: {session_date} to {expiration})"))
+    S.append(Paragraph(f"<b>{mc.key_catalyst}</b> &mdash; {mc.why_it_matters}", BODY))
+    events = (ctx or {}).get("macro_events_this_window") or []
+    if events:
+        rows = [[_p("When (ET)", CELLH), _p("SGT", CELLH), _p("Event", CELLH), _p("Detail", CELLH)]]
+        for ev in sorted(events, key=lambda e: (e.get("date") or "", e.get("time_et") or "")):
+            rows.append([_p(_fmt_et(ev.get("date"), ev.get("time_et"))),
+                         _p(_et_to_sgt(ev.get("date"), ev.get("time_et"))),
+                         _p(ev.get("event") or "&mdash;"), _p(ev.get("detail") or "&mdash;")])
+        S.append(_table(rows, [1.45*inch, 1.15*inch, 1.9*inch, 2.2*inch]))
+        S.append(Spacer(1, 6))
+    elif ctx is not None:
+        S.append(Paragraph("No scheduled macro events found in the holding window.", NOTE))
+    for g in mc.per_strategy_guidance:
+        S.append(Paragraph(f"<b>{g.strategy_type}:</b> {g.guidance}", BULLET, bulletText='\u2022'))
+    S.append(Spacer(1, 4))
+
+
+def build_vol_check(S, vc, ctx):
+    S.append(_h(5, "Realized vs. Implied Vol"))
+    rv_missing = ctx is not None and ctx.get("realized_vol_20d_pct") is None
+    if rv_missing:
+        _placeholder(S, f"realized vol not supplied; IV used {vc.iv_used_pct:g}% "
+                        f"({vc.iv_source.replace('_', ' ')}). Verdict below is not data-backed.")
+    else:
+        S.append(Paragraph(
+            f"<b>10d RV {vc.realized_vol_10d_pct:g}% &nbsp;&middot;&nbsp; 20d RV {vc.realized_vol_20d_pct:g}% "
+            f"&nbsp;&middot;&nbsp; IV {vc.iv_used_pct:g}% ({vc.iv_source.replace('_', ' ')})</b>", BODY))
+    if vc.implied_move:
+        im = vc.implied_move
+        S.append(Paragraph(
+            f"Implied 1&sigma; range to expiry: ${im.expected_range_usd['low']:.2f}&ndash;"
+            f"${im.expected_range_usd['high']:.2f} (&plusmn;{im.one_sigma_move_pct:g}%)", BODY))
+    S.append(Paragraph(f"<b>Verdict: {vc.verdict.upper()}.</b> {vc.strategy_tilt}", BODY))
+    S.append(Spacer(1, 4))
+
+
+def build_thesis(S, thesis):
+    outer, S = S, []  # collected, then appended as one KeepTogether block
+    S.append(_h(6, "Thesis"))
+    lv = lambda xs: ", ".join(f"{x:g}" for x in xs) if xs else "&mdash;"
+    rows = [[_p("Scenario", CELLH), _p("Condition / expected behavior", CELLH), _p("Levels", CELLH)],
+            [_p("<b>Base case</b>"), _p(thesis.base_case),
+             _p(f"{thesis.base_case_levels[0]:g}&ndash;{thesis.base_case_levels[-1]:g} range"
+                if len(thesis.base_case_levels) >= 2 else lv(thesis.base_case_levels))],
+            [_p("<b>Upside break</b>"), _p(thesis.upside_break.condition), _p(lv(thesis.upside_break.target_levels))],
+            [_p("<b>Downside break</b>"), _p(thesis.downside_break.condition), _p(lv(thesis.downside_break.target_levels))]]
+    S.append(_table(rows, [1.15*inch, 4.2*inch, 1.35*inch]))
+    S.append(Spacer(1, 4))
+    outer.append(KeepTogether(S))
+
+
+def build_strategies(S, strategies, portfolio_size):
+    outer, S = S, []  # collected, then appended as one KeepTogether block
+    S.append(_h(7, "Strategies (ranked by POP, highest first)"))
+    ranked = _ranked(strategies)
+    total_risk = sum(s.sizing.total_max_loss_usd for s in ranked)
+    budget = ranked[0].sizing.risk_budget_pct if ranked else 0
+    S.append(Paragraph(
+        f"Risk budget: {budget:g}% of portfolio (${portfolio_size * budget / 100:,.0f}) per strategy. "
+        f"Combined max risk if every strategy were entered: <b>${total_risk:,.0f} "
+        f"({100 * total_risk / portfolio_size:.1f}%)</b>. Trigger-based strategies may not all fire.", BODY))
+    rows = [[_p(h, CELLH) for h in ("#", "Strategy", "Strikes / expiry", "Entry trigger", "Price",
+                                     "Qty", "Max risk", "Max gain", "B/E", "POP")]]
+    for i, s in enumerate(ranked, 1):
+        pr = s.pricing
+        rows.append([
+            _p(i), _p(s.name),
+            _p(f"{_legs_short(s.legs)}<br/>exp <b>{_strategy_expiry_str(s.legs)}</b>"),
+            _p(s.entry_trigger),
+            _p(f"${pr.amount_per_contract_usd / 100:.2f} {pr.credit_or_debit}"),
+            _p(s.sizing.contracts),
+            _p(_fmt_usd(s.sizing.total_max_loss_usd)),
+            _p(_fmt_usd(s.sizing.total_max_profit_usd)),
+            _p(_breakevens(s)),
+            _p(f"{s.pop_pct:.0f}%" if s.pop_pct is not None else "&mdash;"),
+        ])
+    S.append(_table(rows, [0.25*inch, 0.85*inch, 1.2*inch, 1.3*inch, 0.65*inch,
+                           0.35*inch, 0.6*inch, 0.6*inch, 0.5*inch, 0.4*inch], font_size=8))
+    if any(s.pricing.pricing_source != "live_chain" for s in ranked):
+        S.append(Paragraph("Priced at spot at session time (Black-Scholes estimate); a trigger-level "
+                           "entry will price differently.", NOTE))
+    S.append(Spacer(1, 4))
+    outer.append(KeepTogether(S))
+
+
+def build_exits(S, strategies):
+    outer, S = S, []  # collected, then appended as one KeepTogether block
+    S.append(_h(8, "Exits"))
+    rows = [[_p("#", CELLH), _p("Profit target (50% rule)", CELLH), _p("Price stop (50% of max loss)", CELLH),
+             _p("Structural invalidation (takes precedence)", CELLH)]]
+    for i, s in enumerate(_ranked(strategies), 1):
+        pt, sl = s.profit_target_50pct, s.stop_loss
+        verb_tp = "Buy back" if s.pricing.credit_or_debit == "credit" else "Sell"
+        stop = (f"{verb_tp} at ~${sl.price_trigger_usd:.2f} (&minus;{_fmt_usd(sl.total_loss_at_stop_usd)})"
+                if sl.price_trigger_usd is not None else "Monitor manually")
+        rows.append([_p(i),
+                     _p(f"{verb_tp} at ~${pt.trigger_price_usd:.2f} (+{_fmt_usd(pt.total_profit_usd)})"
+                        f"<br/><font color='#777777'>{pt.est_path}</font>"),
+                     _p(stop), _p(sl.structural_trigger)])
+    S.append(_table(rows, [0.25*inch, 2.25*inch, 1.8*inch, 2.4*inch]))
+    S.append(Spacer(1, 4))
+    outer.append(KeepTogether(S))
+
+
+def build_liquidity(S, strategies):
+    S.append(_h(9, "Liquidity / Bid-Ask Check"))
+    ranked = _ranked(strategies)
+    if all(s.liquidity_check.status == "awaiting_live_chain" for s in ranked):
+        _placeholder(S, "awaiting live chain. Verify relative spread and OI per leg "
+                        "(green: &lt;5% and OI &gt;500) and use limit orders at mid.")
+        return
+    rows = [[_p("#", CELLH), _p("Strategy", CELLH), _p("Status", CELLH), _p("Detail", CELLH)]]
+    for i, s in enumerate(ranked, 1):
+        rows.append([_p(i), _p(s.name), _p(s.liquidity_check.status.replace('_', ' ').upper()),
+                     _p(s.liquidity_check.detail or "&mdash;")])
+    S.append(_table(rows, [0.25*inch, 1.6*inch, 1.2*inch, 3.65*inch]))
+    S.append(Spacer(1, 4))
+
+
+def build_avoid(S, avoid):
+    if not avoid:
+        return
+    S.append(_h(10, "Avoid"))
+    for a in avoid:
+        S.append(Paragraph(f"<b>{a.structure}:</b> {a.reason}", BULLET, bulletText='\u2022'))
     S.append(Spacer(1, 4))
 
 
@@ -567,16 +792,17 @@ def build_footer(S):
     S.append(Spacer(1, 14))
     S.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#DDDDDD'), spaceAfter=8))
     S.append(Paragraph(
-        "Session notes generated by Protocol Coffee and Tea. Greeks, credits and sizing figures "
-        "are illustrative estimates unless pricing_source is \"live_chain\". Educational material "
-        "only &mdash; not financial advice, and not a recommendation to enter any position. "
-        "Verify all pricing against your broker before trading.", NOTE))
+        "Session notes generated by Protocol Coffee and Tea. Credits, sizing and POP are "
+        "illustrative estimates unless pricing_source is \"live_chain\". Reasoning-driven, not yet "
+        "backtest-validated. Educational material only &mdash; not financial advice. Verify all "
+        "pricing against your broker before trading.", NOTE))
 
 
 # ---------- entry point ----------
 
 def generate_pdf(output: ReasoningOutput, session_date: str, expiration: str,
-                  portfolio_size: float, spot: float, out_path: str):
+                  portfolio_size: float, spot: float, out_path: str,
+                  input_context: dict | None = None, data_quality: dict | None = None):
     doc = SimpleDocTemplate(
         out_path, pagesize=letter,
         leftMargin=0.9*inch, rightMargin=0.9*inch,
@@ -584,14 +810,17 @@ def generate_pdf(output: ReasoningOutput, session_date: str, expiration: str,
     )
     S = []
     build_header(S, session_date, expiration, portfolio_size, spot)
-    build_market_structure(S, output.market_structure)
-    build_macro_context(S, output.macro_context)
-    build_vol_check(S, output.volatility_check)
+    build_data_quality(S, output, input_context, data_quality)
+    build_market_structure(S, output.market_structure, spot)
+    build_day_over_day(S, output.day_over_day_comparison, input_context)
     build_flow_context(S, output.eod_flow_context)
+    build_macro_context(S, output.macro_context, input_context, session_date, expiration)
+    build_vol_check(S, output.volatility_check, input_context)
     build_thesis(S, output.trade_thesis)
-    build_strategy_comparison(S, output.strategies)
-    build_sizing(S, output.strategies)
-    build_day_over_day(S, output.day_over_day_comparison)
+    build_strategies(S, output.strategies, portfolio_size)
+    build_exits(S, output.strategies)
+    build_liquidity(S, output.strategies)
+    build_avoid(S, output.avoid)
     build_footer(S)
     doc.build(S)
     return out_path
@@ -657,6 +886,14 @@ class handler(BaseHTTPRequestHandler):
             expiration = body.get('expiration')
             portfolio_size = body.get('portfolio_size')
             spot = body.get('spot')
+            # Optional (v2 layout): the same input object sent to
+            # /api/coffee-and-tea, plus the Tiger pull's data_quality block.
+            # Display-only (data-quality table, macro event table, day-over-
+            # day staleness note, missing-RV flags). Older frontends that
+            # don't send them still get a valid PDF; those parts just degrade
+            # to what the output alone can show.
+            input_context = body.get('input') or None
+            data_quality = body.get('data_quality') or None
 
             if not all([output_data, session_date, expiration, portfolio_size, spot]):
                 self._send_json_error(400, 'Missing one of: output, session_date, expiration, portfolio_size, spot')
@@ -678,6 +915,8 @@ class handler(BaseHTTPRequestHandler):
                 portfolio_size=float(portfolio_size),
                 spot=float(spot),
                 out_path=out_path,
+                input_context=input_context,
+                data_quality=data_quality,
             )
 
             with open(out_path, 'rb') as f:

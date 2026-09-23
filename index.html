@@ -3030,7 +3030,9 @@ async function buildPriorSnapshot(ticker) {
   const sameTicker = history.sort((a, b) => new Date(b.captured_at) - new Date(a.captured_at));
   // Skip the first entry if it matches currentData's own captured_at (that's "today").
   const prior = sameTicker.find((s) => !currentData || s.captured_at !== currentData.captured_at);
-  return prior ? buildGexDataFromCurrent(prior) : null;
+  // captured_at carried through so the PDF can flag a stale comparison
+  // (e.g. a prior snapshot from before an expiry rolled off).
+  return prior ? { ...buildGexDataFromCurrent(prior), captured_at: prior.captured_at } : null;
 }
 
 // Transforms currentFlowStats (from the EOD Flow Analyst) into the
@@ -3343,6 +3345,10 @@ async function downloadCoffeeAndTeaPdf() {
         expiration: currentCtInput.expiration,
         portfolio_size: currentCtInput.portfolio_size_usd,
         spot: currentCtInput.gex_data.spot,
+        // v2 PDF layout: display-only context for the data-quality table,
+        // macro event table (ET + SGT), staleness and missing-RV flags.
+        input: currentCtInput,
+        data_quality: currentData?.data_quality ?? null,
       }),
     });
 
