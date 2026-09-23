@@ -270,7 +270,7 @@
 <div class="controls" style="margin-top:12px;">
   <button id="ctRunBtn" disabled>Run Protocol Coffee and Tea</button>
   <button id="ctPdfBtn" disabled>Download session PDF</button>
-  <button id="ctRefreshMacroBtn" type="button" title="Clear cached macro events and search this session's window again">Refresh macro calendar</button>
+  <button id="ctRefreshMacroBtn" type="button" title="Clear the cached macro calendar and fetch the rest of this month again">Refresh macro calendar</button>
 </div>
 
 <div class="status" id="ctStatus"></div>
@@ -3078,72 +3078,90 @@ async function fetchMacroEvents(sessionDate, expiration) {
       console.warn('Macro events fetch failed:', res.status);
       return { ok: false, events: [] };
     }
-    const { macro_events } = await res.json();
-    return { ok: true, events: Array.isArray(macro_events) ? macro_events : [] };
+    const { macro_events, sources } = await res.json();
+    return { ok: true, events: Array.isArray(macro_events) ? macro_events : [], sources: sources || {} };
   } catch (err) {
     console.warn('Macro events fetch error:', err);
     return { ok: false, events: [] };
   }
 }
 
-// Macro events are now fetched per SESSION WINDOW (session_date ->
-// expiration, usually 0-5 days) instead of once per calendar month.
-// Why: the month-wide search asked the model to find ~40 days of events in
-// one capped call, and it came back sparse - then that sparse (sometimes
-// empty) result was cached for the whole month, so later sessions saw
-// "No scheduled macro events" even in weeks with jobless claims, durable
-// goods and Fed speakers. A few-day window is a much easier, more reliable
-// search, and the backend now caps searches per call (max_uses) so cost
-// stays bounded.
+// Macro calendar: covers the REST OF THE TRADING MONTH (today -> month-end,
+// stretched to the session's expiration if that lands next month), in one
+// call to /api/get-macro-events, which merges four sources server-side:
+// FRED official release dates, the FOMC calendar, announced Treasury
+// auctions, and a small capped AI search for non-data events (speeches,
+// state visits, foreign central banks). See that file for details.
 //
-// Caching rules:
-// - Non-empty results are cached per window for MACRO_WINDOW_TTL_MS.
-// - Empty results are NOT cached - an empty answer is far more likely to be
-//   a weak search than a genuinely empty week, so the next run retries.
-// - Failed fetches are never cached.
-const MACRO_WINDOW_CACHE_PREFIX = 'macroWindowCache_'; // + "<session>_<expiration>"
-const MACRO_LEGACY_MONTH_PREFIX = 'macroEventsCache_'; // old month cache - cleared on refresh
-const MACRO_WINDOW_TTL_MS = 12 * 60 * 60 * 1000;
+// Caching: one entry per month, 12h TTL, and only cached when FRED (the
+// backbone) succeeded - so a missing key or FRED outage is retried on the
+// next run instead of being frozen in for the month. The cached range has
+// to cover the session's window, otherwise it refetches.
+const MACRO_MONTH_CACHE_PREFIX = 'macroCalendar_v2_'; // + "YYYY-MM"
+const MACRO_LEGACY_PREFIXES = ['macroEventsCache_', 'macroWindowCache_', 'macroMonthCache_'];
+const MACRO_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 
-function macroWindowKey(sessionDate, expiration) {
-  return `${MACRO_WINDOW_CACHE_PREFIX}${sessionDate}_${expiration}`;
+function lastDayOfMonth(dateStr) {
+  const [y, m] = dateStr.split('-').map(Number);
+  return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10); // day 0 of next month
 }
 
-async function fetchAndCacheWindow(sessionDate, expiration) {
-  const { ok, events } = await fetchMacroEvents(sessionDate, expiration);
-  if (ok && events.length) {
+function macroRangeFor(sessionDate, expiration) {
+  const monthEnd = lastDayOfMonth(sessionDate);
+  return [sessionDate, expiration && expiration > monthEnd ? expiration : monthEnd];
+}
+
+function describeMacroSources(sources) {
+  const label = { fred: 'FRED', fomc: 'FOMC', treasury: 'Treasury', search: 'search' };
+  return Object.entries(sources || {})
+    .map(([k, v]) => `${label[k] || k} ${v.ok ? v.count : 'failed'}`)
+    .join(', ');
+}
+
+async function fetchAndCacheMacroRange(from, through) {
+  const result = await fetchMacroEvents(from, through);
+  if (result.ok && result.sources?.fred?.ok) {
     try {
-      localStorage.setItem(macroWindowKey(sessionDate, expiration),
-        JSON.stringify({ fetched_at: new Date().toISOString(), events }));
+      localStorage.setItem(MACRO_MONTH_CACHE_PREFIX + from.slice(0, 7), JSON.stringify({
+        fetched_at: new Date().toISOString(),
+        range_start: from,
+        range_end: through,
+        events: result.events,
+        sources: result.sources,
+      }));
     } catch (e) {
       // localStorage full/unavailable - fine, just won't cache this run
     }
   }
-  return { ok, events };
+  return result;
 }
 
 async function getMacroEventsForSession(sessionDate, expiration) {
-  const raw = localStorage.getItem(macroWindowKey(sessionDate, expiration));
+  const [from, through] = macroRangeFor(sessionDate, expiration);
+  let monthEvents = null;
+  const raw = localStorage.getItem(MACRO_MONTH_CACHE_PREFIX + sessionDate.slice(0, 7));
   if (raw) {
     try {
-      const cached = JSON.parse(raw);
-      const fresh = Date.now() - new Date(cached.fetched_at).getTime() < MACRO_WINDOW_TTL_MS;
-      if (fresh && Array.isArray(cached.events) && cached.events.length) {
-        return cached.events;
-      }
+      const c = JSON.parse(raw);
+      const fresh = Date.now() - new Date(c.fetched_at).getTime() < MACRO_CACHE_TTL_MS;
+      const covers = c.range_start <= sessionDate && c.range_end >= (expiration || sessionDate);
+      if (fresh && covers && Array.isArray(c.events)) monthEvents = c.events;
     } catch (e) {
-      // corrupt entry - fall through to a fresh fetch
+      // corrupt entry - refetch
     }
   }
-  const { events } = await fetchAndCacheWindow(sessionDate, expiration);
-  return events.filter((ev) => ev.date >= sessionDate && ev.date <= expiration);
+  if (!monthEvents) monthEvents = (await fetchAndCacheMacroRange(from, through)).events;
+  // Coffee and Tea's spec reasons about the holding window only - the rest
+  // of the month stays cached for later sessions.
+  return monthEvents.filter((ev) => ev.date >= sessionDate && ev.date <= expiration);
 }
 
 function clearMacroCaches() {
+  const prefixes = [MACRO_MONTH_CACHE_PREFIX, ...MACRO_LEGACY_PREFIXES];
   const doomed = [];
   for (let i = 0; i < localStorage.length; i++) {
     const k = localStorage.key(i);
-    if (k && (k.startsWith(MACRO_WINDOW_CACHE_PREFIX) || k.startsWith(MACRO_LEGACY_MONTH_PREFIX))) doomed.push(k);
+    if (k && prefixes.some((p) => k.startsWith(p))) doomed.push(k);
   }
   doomed.forEach((k) => localStorage.removeItem(k));
   return doomed.length;
@@ -3151,18 +3169,17 @@ function clearMacroCaches() {
 
 async function refreshMacroCalendar() {
   ctRefreshMacroBtn.disabled = true;
-  const cleared = clearMacroCaches();
-  const sessionDate = todayEasternDateStr();
-  const expiration = currentData?.expiration && currentData.expiration >= sessionDate
-    ? currentData.expiration
-    : sessionDate;
-  setCtStatus(`Cleared ${cleared} cached macro entr${cleared === 1 ? 'y' : 'ies'}. Searching ${sessionDate} to ${expiration}...`);
+  clearMacroCaches();
+  const today = todayEasternDateStr();
+  const [from, through] = macroRangeFor(today, currentData?.expiration);
+  setCtStatus(`Refreshing macro calendar ${from} to ${through}...`);
   try {
-    const { ok, events } = await fetchAndCacheWindow(sessionDate, expiration);
-    if (ok) {
-      setCtStatus(`Macro calendar refreshed - ${events.length} event(s) found for ${sessionDate} to ${expiration}.`);
+    const r = await fetchAndCacheMacroRange(from, through);
+    if (!r.ok) {
+      setCtStatus('Macro calendar refresh failed - the request itself failed. Nothing was cached; try again.', true);
     } else {
-      setCtStatus('Macro calendar refresh failed - the search request itself failed. Nothing was cached; try again.', true);
+      const fredErr = r.sources?.fred?.ok ? '' : ` FRED failed (${r.sources?.fred?.error || 'unknown'}) - not cached.`;
+      setCtStatus(`Macro calendar: ${r.events.length} event(s) ${from} to ${through} [${describeMacroSources(r.sources)}].${fredErr}`, !!fredErr);
     }
   } catch (err) {
     setCtStatus('Macro calendar refresh failed: ' + err.message, true);

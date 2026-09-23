@@ -465,6 +465,15 @@ def _et_to_sgt(date_str, time_et):
     return "&mdash;"
 
 
+def _macro_source_tag(ev):
+    """Small grey tag showing where a macro event came from - official
+    schedules (FRED/FOMC/Treasury) vs. AI web search - so search-sourced
+    items can be weighed accordingly."""
+    label = {"fred": "official schedule", "fomc": "Fed calendar",
+             "treasury": "Treasury", "search": "web search"}.get(ev.get("source"))
+    return f"<br/><font color='#888888' size='7'>{label}</font>" if label else ""
+
+
 def _fmt_et(date_str, time_et):
     try:
         d = _dt.strptime(date_str, "%Y-%m-%d").strftime("%a %d %b")
@@ -681,10 +690,11 @@ def build_macro_context(S, mc, ctx, session_date, expiration):
     events = (ctx or {}).get("macro_events_this_window") or []
     if events:
         rows = [[_p("When (ET)", CELLH), _p("SGT", CELLH), _p("Event", CELLH), _p("Detail", CELLH)]]
-        for ev in sorted(events, key=lambda e: (e.get("date") or "", e.get("time_et") or "")):
+        for ev in sorted(events, key=lambda e: (e.get("date") or "", e.get("time_et") or "99:99")):
             rows.append([_p(_fmt_et(ev.get("date"), ev.get("time_et"))),
                          _p(_et_to_sgt(ev.get("date"), ev.get("time_et"))),
-                         _p(ev.get("event") or "&mdash;"), _p(ev.get("detail") or "&mdash;")])
+                         _p((ev.get("event") or "&mdash;") + _macro_source_tag(ev)),
+                         _p(ev.get("detail") or "&mdash;")])
         S.append(_table(rows, [1.45*inch, 1.15*inch, 1.9*inch, 2.2*inch]))
         S.append(Spacer(1, 6))
     elif ctx is not None:
