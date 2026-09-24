@@ -272,3 +272,58 @@ if showPlans and barstate.islast and plName.size() > 0
             table.cell(plans, 4, r, fmtPx(plInv.get(i)), text_color = cInval, bgcolor = rowBg, text_size = size.small)
             table.cell(plans, 5, r, plInfo.get(i), text_color = color.silver, bgcolor = rowBg, text_size = size.small, text_halign = text.align_left)
         table.cell(plans, plansFull ? 6 : 4, r, dist, text_color = color.white, bgcolor = na(distBg) ? rowBg : distBg, text_size = size.small)
+
+// ── Alerts: one TradingView alert covers every plan and every event.
+// Create it with Condition = "C&T" -> "Any alert() function call".
+// Each event fires once per plan per day. "Touched" means the bar's range
+// reached the level (not a close beyond it) - an early warning, not a
+// confirmed break. Alerts only fire in real time, never on history.
+// NOTE: TradingView alerts keep the settings they were created with, so
+// after pasting new levels you must delete and recreate the alert.
+ga = "Alerts"
+alertOn    = input.bool(true, "Send alerts", group = ga,
+     tooltip = "Also needs one TradingView alert: Alert -> Condition: C&T -> 'Any alert() function call'. Recreate it after each new levels paste.")
+alertScope = input.string("All plans", "Alert on", options = ["All plans", "Picked plan only"], group = ga,
+     tooltip = "Picked plan = the one chosen in Display -> Plan lines to show.")
+aApproach  = input.float(0.5, "Heads-up when price is within (points of an entry, 0 = off)", minval = 0, step = 0.05, group = ga)
+aEntry     = input.bool(true, "Entry touched", group = ga)
+aTgt       = input.bool(true, "50% target touched", group = ga)
+aStop      = input.bool(true, "Price stop touched", group = ga)
+aInv       = input.bool(true, "Invalidation touched", group = ga)
+
+newDay = timeframe.change("D")
+// Per plan, a string of event letters already sent today: A approach,
+// E entry, T target, S stop, I invalidation.
+var array<string> fired = array.new<string>()
+if fired.size() != plName.size()
+    fired := array.new<string>(plName.size(), "")
+if newDay and fired.size() > 0
+    for i = 0 to fired.size() - 1
+        fired.set(i, "")
+
+touched(float lvl) => not na(lvl) and low <= lvl and high >= lvl
+
+if alertOn and plName.size() > 0
+    px = str.tostring(close, format.mintick)
+    for i = 0 to plName.size() - 1
+        inScope = alertScope == "All plans" or planSel == "S" + str.tostring(i + 1)
+        if inScope
+            f = fired.get(i)
+            nm = plName.get(i)
+            e = plEntry.get(i)
+            if aApproach > 0 and not na(e) and math.abs(close - e) <= aApproach and not str.contains(f, "A") and not str.contains(f, "E") and not touched(e)
+                alert("C&T " + nm + ": approaching entry " + fmtPx(e) + " (SPY " + px + ")", alert.freq_once_per_bar)
+                f += "A"
+            if aEntry and touched(e) and not str.contains(f, "E")
+                alert("C&T " + nm + ": ENTRY " + fmtPx(e) + " touched (SPY " + px + ")", alert.freq_once_per_bar)
+                f += "E"
+            if aTgt and touched(plTgt.get(i)) and not str.contains(f, "T")
+                alert("C&T " + nm + ": 50% TARGET " + fmtPx(plTgt.get(i)) + " touched (SPY " + px + ")", alert.freq_once_per_bar)
+                f += "T"
+            if aStop and touched(plStop.get(i)) and not str.contains(f, "S")
+                alert("C&T " + nm + ": PRICE STOP " + fmtPx(plStop.get(i)) + " touched (SPY " + px + ")", alert.freq_once_per_bar)
+                f += "S"
+            if aInv and touched(plInv.get(i)) and not str.contains(f, "I")
+                alert("C&T " + nm + ": INVALIDATION " + fmtPx(plInv.get(i)) + " touched (SPY " + px + ")", alert.freq_once_per_bar)
+                f += "I"
+            fired.set(i, f)
