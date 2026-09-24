@@ -23,7 +23,15 @@ TZ = "America/New_York"
 data = input.text_area("CT|0000-00-00|SPY", "Levels",
      tooltip = "Paste the block from gex-visualizer's 'Copy levels for TradingView' button. Replace everything in this box each session.")
 
-gs = "Show"
+gm = "Display"
+dispMode  = input.string("Focus", "Mode", options = ["Focus", "Full"], group = gm,
+     tooltip = "Focus: the nearest walls each side of price, the gamma flip, and plan entry / 50% / stop / invalidation only. Full: everything switched on below.")
+wallsEach = input.int(2, "Focus: walls shown each side of price", minval = 1, maxval = 10, group = gm)
+planSel   = input.string("All", "Plan lines to show", options = ["All", "S1", "S2", "S3", "None"], group = gm,
+     tooltip = "Show one plan's lines at a time to cut clutter. The plans box always lists every plan.")
+focus = dispMode == "Focus"
+
+gs = "Show (Full mode)"
 gW = input.bool(true, "GEX walls + flip", group = gs)
 gA = input.bool(true, "POC / VA / MAs", group = gs)
 gE = input.bool(true, "Strategy entry + invalidation", group = gs)
@@ -37,6 +45,7 @@ crowdGap   = input.float(0.5, "Stagger labels closer than (points)", minval = 0,
      tooltip = "Labels whose prices are this close get pushed sideways so they don't overlap. Raise it if labels still collide when zoomed out.")
 showStatus = input.bool(true, "Status box (date / freshness check)", group = gs)
 showPlans  = input.bool(true, "Plans box", group = gs)
+plansFull  = input.bool(false, "Plans box: show invalidation + trade details", group = gs)
 plansPos   = input.string("middle right", "Plans box position", options = ["middle right", "top right", "bottom left", "top left"], group = gs)
 atEntryPts = input.float(0.25, "Plans box: 'at entry' within (points)", minval = 0, step = 0.05, group = gs)
 
@@ -137,30 +146,58 @@ if barstate.isfirst
                 offs.push(na(o) ? 2 : int(o))
         else
             badLines += 1
-    if codes.size() > 0
-        for i = 0 to codes.size() - 1
-            c = codes.get(i)
-            if codeOn(c)
-                line.new(bar_index, prices.get(i), bar_index + 1, prices.get(i), extend = extend.both,
-                     color = codeColor(c), width = widths.get(i), style = codeStyle(c))
 
-// ── Labels at the right edge (recreated on the last bar so they follow price).
-// Levels at the SAME price are merged into one label ("766 -195M · Base low
-// · S2 entry") and nearby ones are staggered sideways, so nothing overlaps.
+// ── Which levels to show. Evaluated on the last bar, because Focus mode
+// depends on where price is now.
+isWall(string c) => c == "WP" or c == "WN"
+isPlanLine(string c) => c == "E" or c == "X" or c == "T" or c == "S" or c == "BE"
+
+// Number of walls on the same side of price that are closer than wall i.
+wallRank(int i) =>
+    px = prices.get(i)
+    above = px >= close
+    int rank = 0
+    for j = 0 to codes.size() - 1
+        if j != i and isWall(codes.get(j))
+            pj = prices.get(j)
+            if (pj >= close) == above and math.abs(pj - close) < math.abs(px - close)
+                rank += 1
+    rank
+
+visible(int i) =>
+    c = codes.get(i)
+    bool ok = true
+    if focus
+        ok := c == "F" or (isWall(c) and wallRank(i) < wallsEach) or c == "E" or c == "X" or c == "T" or c == "S"
+    else
+        ok := codeOn(c)
+    if ok and isPlanLine(c)
+        ok := planSel == "All" or (planSel != "None" and str.startswith(texts.get(i), planSel + " "))
+    ok
+
+// ── Lines + labels (recreated on the last bar so they follow price).
+// Levels at the SAME price share one label ("766 -195M · S2 entry"), and
+// nearby labels are staggered sideways so nothing overlaps.
+var line[]  lns  = array.new<line>()
 var label[] labs = array.new<label>()
 if barstate.islast
+    for l in lns
+        l.delete()
+    lns.clear()
     for l in labs
         l.delete()
     labs.clear()
-    if showLabels and codes.size() > 0
+    if codes.size() > 0
         vp = array.new<float>()
         vt = array.new<string>()
         vc = array.new<color>()
         seen = map.new<float, int>()
         for i = 0 to codes.size() - 1
-            c = codes.get(i)
-            if codeOn(c)
+            if visible(i)
+                c = codes.get(i)
                 px = prices.get(i)
+                lns.push(line.new(bar_index - 1, px, bar_index, px, extend = extend.both,
+                     color = codeColor(c), width = widths.get(i), style = codeStyle(c)))
                 if seen.contains(px)
                     k = seen.get(px)
                     vt.set(k, vt.get(k) + " · " + texts.get(i))
@@ -169,7 +206,7 @@ if barstate.islast
                     vp.push(px)
                     vt.push(texts.get(i))
                     vc.push(codeColor(c))
-        if vp.size() > 0
+        if showLabels and vp.size() > 0
             idx = vp.sort_indices(order.ascending)
             float prevPx = na
             int prevOff = 0
@@ -199,7 +236,7 @@ if showStatus and barstate.islast
         msg := "Levels are from " + hdrDate + " - not today (" + today + " NY)"
         bg  := color.new(color.red, 20)
     else
-        msg := "Levels OK - " + hdrDate + ", " + str.tostring(codes.size()) + " lines"
+        msg := "Levels OK - " + hdrDate + (focus ? " (Focus mode)" : "")
     table.cell(status, 0, 0, "C&T " + hdrDate, text_color = color.gray, text_size = size.small)
     table.cell(status, 0, 1, msg + (badLines > 0 ? " | " + str.tostring(badLines) + " unreadable line(s)" : ""),
          text_color = color.white, bgcolor = bg, text_size = size.small)
@@ -213,8 +250,10 @@ var table plans = table.new(plansPos == "top right" ? position.top_right : plans
      plansPos == "top left" ? position.top_left : position.middle_right, 7, 11,
      bgcolor = color.new(#131722, 5), border_color = color.new(#363A45, 0), border_width = 1)
 if showPlans and barstate.islast and plName.size() > 0
-    hdr = array.from("Plan", "Entry", "50% tgt", "Stop", "Inval", "Trade", "Price vs entry")
-    for c = 0 to 6
+    table.clear(plans, 0, 0, 6, 10)  // drop cells left over from the wider layout
+    hdr = plansFull ? array.from("Plan", "Entry", "50% tgt", "Stop", "Inval", "Trade", "vs entry") :
+         array.from("Plan", "Entry", "50% tgt", "Stop", "vs entry")
+    for c = 0 to hdr.size() - 1
         table.cell(plans, c, 0, hdr.get(c), text_color = color.gray, text_size = size.small)
     for i = 0 to math.min(plName.size(), 10) - 1
         r = i + 1
@@ -222,10 +261,14 @@ if showPlans and barstate.islast and plName.size() > 0
         d = na(e) ? na : close - e
         string dist = na(d) ? "-" : math.abs(d) <= atEntryPts ? "AT ENTRY" : (d > 0 ? "+" : "") + str.tostring(d, "#.##")
         color distBg = na(d) ? na : math.abs(d) <= atEntryPts ? color.new(cEntry, 20) : na
-        table.cell(plans, 0, r, plName.get(i), text_color = color.white, text_size = size.small, text_halign = text.align_left)
-        table.cell(plans, 1, r, fmtPx(e), text_color = cEntry, text_size = size.small)
-        table.cell(plans, 2, r, fmtPx(plTgt.get(i)), text_color = cTarget, text_size = size.small)
-        table.cell(plans, 3, r, fmtPx(plStop.get(i)), text_color = cStopPx, text_size = size.small)
-        table.cell(plans, 4, r, fmtPx(plInv.get(i)), text_color = cInval, text_size = size.small)
-        table.cell(plans, 5, r, plInfo.get(i), text_color = color.silver, text_size = size.small, text_halign = text.align_left)
-        table.cell(plans, 6, r, dist, text_color = color.white, bgcolor = distBg, text_size = size.small)
+        selected = planSel == "S" + str.tostring(i + 1)
+        color rowBg = selected ? color.new(color.white, 88) : na
+        color nameCol = planSel == "All" or selected ? color.white : color.gray
+        table.cell(plans, 0, r, plName.get(i), text_color = nameCol, bgcolor = rowBg, text_size = size.small, text_halign = text.align_left)
+        table.cell(plans, 1, r, fmtPx(e), text_color = cEntry, bgcolor = rowBg, text_size = size.small)
+        table.cell(plans, 2, r, fmtPx(plTgt.get(i)), text_color = cTarget, bgcolor = rowBg, text_size = size.small)
+        table.cell(plans, 3, r, fmtPx(plStop.get(i)), text_color = cStopPx, bgcolor = rowBg, text_size = size.small)
+        if plansFull
+            table.cell(plans, 4, r, fmtPx(plInv.get(i)), text_color = cInval, bgcolor = rowBg, text_size = size.small)
+            table.cell(plans, 5, r, plInfo.get(i), text_color = color.silver, bgcolor = rowBg, text_size = size.small, text_halign = text.align_left)
+        table.cell(plans, plansFull ? 6 : 4, r, dist, text_color = color.white, bgcolor = na(distBg) ? rowBg : distBg, text_size = size.small)
