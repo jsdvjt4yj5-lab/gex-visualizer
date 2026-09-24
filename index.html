@@ -3631,7 +3631,19 @@ function buildCtLevelsText(output, input) {
     lines.push(`${code}|${d.price}|${clean(d.short || d.text)}|${d.width}|${d.labelOffset || 2}`);
   });
   // Legend: full strategy names, shown once in the indicator's status box.
-  (output.strategies || []).forEach((s, i) => lines.push(`L|${i + 1}|${clean(s.name)}`));
+  // Plan rows for the indicator's plans box:
+  // L|n|name|entry|50% target (SPY)|price stop (SPY)|invalidation|trade summary
+  const num = (x) => (typeof x === 'number' && Number.isFinite(x) ? String(+x.toFixed(2)) : '');
+  (output.strategies || []).forEach((s, i) => {
+    const pr = s.pricing || {};
+    const prem = typeof pr.amount_per_contract_usd === 'number' ? `$${(pr.amount_per_contract_usd / 100).toFixed(2)} ${pr.credit_or_debit || ''}`.trim() : '';
+    const pop = typeof s.pop_pct === 'number' ? `POP ${Math.round(s.pop_pct)}%` : '';
+    const qty = s.sizing?.contracts ? `${s.sizing.contracts}x` : '';
+    const risk = typeof s.sizing?.total_max_loss_usd === 'number' ? `risk $${Math.round(s.sizing.total_max_loss_usd)}` : '';
+    const info = [prem, pop, qty, risk].filter(Boolean).join(' · ');
+    lines.push(['L', i + 1, clean(s.name), num(s.entry_level), num((s.profit_target_50pct?.underlying_levels || [])[0]),
+      num((s.stop_loss?.underlying_levels || [])[0]), num(s.invalidation_level), clean(info)].join('|'));
+  });
   return { text: lines.join('\n'), count: drawn.length };
 }
 

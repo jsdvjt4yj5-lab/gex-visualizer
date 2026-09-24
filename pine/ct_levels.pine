@@ -36,6 +36,9 @@ labelSize  = input.string("small", "Label size", options = ["small", "normal", "
 crowdGap   = input.float(0.5, "Stagger labels closer than (points)", minval = 0, step = 0.1, group = gs,
      tooltip = "Labels whose prices are this close get pushed sideways so they don't overlap. Raise it if labels still collide when zoomed out.")
 showStatus = input.bool(true, "Status box (date / freshness check)", group = gs)
+showPlans  = input.bool(true, "Plans box", group = gs)
+plansPos   = input.string("middle right", "Plans box position", options = ["middle right", "top right", "bottom left", "top left"], group = gs)
+atEntryPts = input.float(0.25, "Plans box: 'at entry' within (points)", minval = 0, step = 0.05, group = gs)
 
 gc = "Colours"
 cPos    = input.color(color.rgb(38, 198, 166), "Positive gamma wall", group = gc)
@@ -96,7 +99,12 @@ var array<int>    offs   = array.new<int>()
 var string hdrDate   = ""
 var string hdrTicker = ""
 var int    badLines  = 0
-var array<string> legend = array.new<string>()
+var array<string> plName  = array.new<string>()
+var array<float>  plEntry = array.new<float>()
+var array<float>  plTgt   = array.new<float>()
+var array<float>  plStop  = array.new<float>()
+var array<float>  plInv   = array.new<float>()
+var array<string> plInfo  = array.new<string>()
 
 if barstate.isfirst
     for raw in str.split(data, "\n")
@@ -108,7 +116,13 @@ if barstate.isfirst
             hdrDate   := f.get(1)
             hdrTicker := f.get(2)
         else if f.size() >= 3 and f.get(0) == "L"
-            legend.push("S" + f.get(1) + "  " + f.get(2))
+            // L|n|name|entry|50% target|price stop|invalidation|summary (extra fields optional)
+            plName.push("S" + f.get(1) + "  " + f.get(2))
+            plEntry.push(f.size() > 3 ? str.tonumber(f.get(3)) : na)
+            plTgt.push(f.size() > 4 ? str.tonumber(f.get(4)) : na)
+            plStop.push(f.size() > 5 ? str.tonumber(f.get(5)) : na)
+            plInv.push(f.size() > 6 ? str.tonumber(f.get(6)) : na)
+            plInfo.push(f.size() > 7 ? f.get(7) : "")
         else if f.size() >= 3
             px = str.tonumber(f.get(1))
             if na(px)
@@ -169,7 +183,7 @@ if barstate.islast
                 prevOff := off
 
 // ── Status box: is this today's data, for this ticker?
-var table status = table.new(position.bottom_right, 1, 12, bgcolor = color.new(#131722, 10),
+var table status = table.new(position.bottom_right, 1, 2, bgcolor = color.new(#131722, 10),
      border_color = color.new(#363A45, 0), border_width = 1)
 if showStatus and barstate.islast
     today = str.format_time(timenow, "yyyy-MM-dd", TZ)
@@ -189,8 +203,29 @@ if showStatus and barstate.islast
     table.cell(status, 0, 0, "C&T " + hdrDate, text_color = color.gray, text_size = size.small)
     table.cell(status, 0, 1, msg + (badLines > 0 ? " | " + str.tostring(badLines) + " unreadable line(s)" : ""),
          text_color = color.white, bgcolor = bg, text_size = size.small)
-    // Strategy legend (labels on the chart only say S1 / S2 / S3)
-    if legend.size() > 0
-        for i = 0 to math.min(legend.size(), 10) - 1
-            table.cell(status, 0, 2 + i, legend.get(i), text_color = color.silver, text_size = size.small,
-                 text_halign = text.align_left)
+
+// ── Plans box: one row per strategy, with its SPY levels and how far price
+// is from the entry right now. Levels are the SPY equivalents from the
+// session (50% target and price stop assume the move happens soon after
+// entry - see the PDF for the premium-based exits).
+fmtPx(float x) => na(x) ? "-" : str.tostring(x, "#.##")
+var table plans = table.new(plansPos == "top right" ? position.top_right : plansPos == "bottom left" ? position.bottom_left :
+     plansPos == "top left" ? position.top_left : position.middle_right, 7, 11,
+     bgcolor = color.new(#131722, 5), border_color = color.new(#363A45, 0), border_width = 1)
+if showPlans and barstate.islast and plName.size() > 0
+    hdr = array.from("Plan", "Entry", "50% tgt", "Stop", "Inval", "Trade", "Price vs entry")
+    for c = 0 to 6
+        table.cell(plans, c, 0, hdr.get(c), text_color = color.gray, text_size = size.small)
+    for i = 0 to math.min(plName.size(), 10) - 1
+        r = i + 1
+        e = plEntry.get(i)
+        d = na(e) ? na : close - e
+        string dist = na(d) ? "-" : math.abs(d) <= atEntryPts ? "AT ENTRY" : (d > 0 ? "+" : "") + str.tostring(d, "#.##")
+        color distBg = na(d) ? na : math.abs(d) <= atEntryPts ? color.new(cEntry, 20) : na
+        table.cell(plans, 0, r, plName.get(i), text_color = color.white, text_size = size.small, text_halign = text.align_left)
+        table.cell(plans, 1, r, fmtPx(e), text_color = cEntry, text_size = size.small)
+        table.cell(plans, 2, r, fmtPx(plTgt.get(i)), text_color = cTarget, text_size = size.small)
+        table.cell(plans, 3, r, fmtPx(plStop.get(i)), text_color = cStopPx, text_size = size.small)
+        table.cell(plans, 4, r, fmtPx(plInv.get(i)), text_color = cInval, text_size = size.small)
+        table.cell(plans, 5, r, plInfo.get(i), text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+        table.cell(plans, 6, r, dist, text_color = color.white, bgcolor = distBg, text_size = size.small)
