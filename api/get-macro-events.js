@@ -1,350 +1,138 @@
 // Route: POST /api/get-macro-events
-// Body: { session_date: "2026-09-23", expiration: "2026-09-30" }
-//   (treated as the start/end of the range to cover, inclusive - the
-//   frontend sends today -> end of the trading month)
-// Returns: {
-//   macro_events: [ { event, date, time_et, detail, importance, source }, ... ],
-//   sources: { fred, fomc, treasury, search }  - per-source ok/count/error
-// }
+// Body: { session_date: "2026-09-15", expiration: "2026-09-18" }
+// Returns: { macro_events: [ { event, date, time_et, detail }, ... ], source: "fred", ... }
 //
-// HYBRID CALENDAR (replaces the old "ask the model to web-search the whole
-// month" approach, which came back sparse/empty and then got cached blank):
+// FRED-only rebuild. Replaces the previous version, which used Claude +
+// web search to DISCOVER events (expensive, and unreliable - one call
+// spiked to ~192K tokens from compounding searches). This version makes
+// no model call at all: it asks FRED (St. Louis Fed, free, no billing)
+// for every release scheduled in the window and keeps only the ones on
+// the watchlist below.
 //
-//   1. FRED (St. Louis Fed API v1, fred/releases/dates) - official scheduled
-//      release dates for US economic data (jobs, CPI, PCE, GDP, claims,
-//      durables...), published months ahead. Deterministic, free. Needs
-//      FRED_API_KEY in Vercel env vars. FRED gives dates, not times - the
-//      time shown is each release's usual clock time (see FRED_RELEASES).
-//   2. FOMC - the Fed's own published meeting calendar, hardcoded below
-//      (FOMC_MEETINGS). Update once a year when the Fed publishes the next
-//      year's dates (usually mid-year).
-//   3. Treasury auctions - Fiscal Data API (no key), notes/bonds only. Only
-//      auctions Treasury has already ANNOUNCED appear (~1 week ahead).
-//   4. AI web search (Haiku, capped) - ONLY for scheduled non-data events no
-//      feed carries: Fed speeches, state visits/geopolitics, foreign central
-//      bank decisions, political events. Limited to the next ~2 weeks,
-//      because that's the horizon where these show up in news coverage.
+// Response shape is unchanged ({ macro_events: [{event, date, time_et,
+// detail}] }), so index.html and coffee-and-tea.js need no changes.
 //
-// Sources run in parallel; any one failing never blanks the others. The
-// response reports each source's status so the UI/PDF can say what's missing.
+// Requires a free FRED API key in the Vercel env var FRED_API_KEY
+// (register at fredaccount.stlouisfed.org).
+//
+// KNOWN COVERAGE GAPS vs. the old web-search version - these are NOT on
+// FRED and will no longer appear: ISM PMI, Treasury auctions, BoJ
+// decisions. FRED also provides no release TIMES and no consensus
+// forecasts - time_et below comes from a fixed table of each release's
+// standard publication time, labeled as typical rather than confirmed.
 
-// ---------- 1. FRED ----------
-
-// Which FRED releases matter for an SPY options session, matched by release
-// NAME (more robust than hardcoding IDs). First match wins, so the more
-// specific patterns come first. Times are the release's standard ET time.
-const FRED_RELEASES = [
-  { re: /^Employment Situation$/i, label: 'Jobs report (nonfarm payrolls, unemployment)', time: '08:30', importance: 'high' },
-  { re: /^Consumer Price Index$/i, label: 'CPI', time: '08:30', importance: 'high' },
-  { re: /^Producer Price Index/i, label: 'PPI', time: '08:30', importance: 'high' },
-  { re: /^Personal Income and Outlays$/i, label: 'PCE inflation / personal income & spending', time: '08:30', importance: 'high' },
-  { re: /^Gross Domestic Product$/i, label: 'GDP', time: '08:30', importance: 'high' },
-  { re: /Advance Monthly Sales for Retail/i, label: 'Retail sales', time: '08:30', importance: 'high' },
-  { re: /Unemployment Insurance Weekly Claims/i, label: 'Initial jobless claims', time: '08:30', importance: 'medium' },
-  { re: /Durable Goods/i, label: 'Durable goods orders', time: '08:30', importance: 'medium' },
-  { re: /^New Residential Construction$/i, label: 'Housing starts & building permits', time: '08:30', importance: 'medium' },
-  { re: /Employment Cost Index/i, label: 'Employment Cost Index', time: '08:30', importance: 'medium' },
-  { re: /ADP National Employment/i, label: 'ADP employment', time: '08:15', importance: 'medium' },
-  { re: /Job Openings and Labor Turnover/i, label: 'JOLTS job openings', time: '10:00', importance: 'medium' },
-  { re: /Surveys of Consumers/i, label: 'UMich consumer sentiment', time: '10:00', importance: 'medium' },
-  { re: /Industrial Production and Capacity Utilization/i, label: 'Industrial production', time: '09:15', importance: 'medium' },
-  { re: /International Trade in Goods and Services/i, label: 'Trade balance', time: '08:30', importance: 'low' },
-  { re: /Advance Economic Indicators/i, label: 'Advance economic indicators (goods trade, inventories)', time: '08:30', importance: 'low' },
-  { re: /Import and Export Price/i, label: 'Import/export prices', time: '08:30', importance: 'low' },
-  { re: /Productivity and Costs/i, label: 'Productivity & unit labor costs', time: '08:30', importance: 'low' },
-  { re: /^New Residential Sales$/i, label: 'New home sales', time: '10:00', importance: 'low' },
-  { re: /Existing Home Sales/i, label: 'Existing home sales', time: '10:00', importance: 'low' },
-  { re: /Construction Spending/i, label: 'Construction spending', time: '10:00', importance: 'low' },
-  { re: /Manufacturers' Shipments, Inventories/i, label: 'Factory orders', time: '10:00', importance: 'low' },
+// Matched by release NAME rather than numeric release_id, so a wrong
+// guessed ID can't silently drop an event. startsWith + exclude keeps
+// look-alike releases (e.g. "Gross Domestic Product by State") out.
+const WATCHLIST = [
+  { startsWith: 'fomc press release', label: 'FOMC rate decision', time_et: '14:00', exclude: [] },
+  { startsWith: 'consumer price index', label: 'CPI', time_et: '08:30', exclude: [] },
+  { startsWith: 'producer price index', label: 'PPI', time_et: '08:30', exclude: [] },
+  { startsWith: 'employment situation', label: 'Jobs report (nonfarm payrolls)', time_et: '08:30', exclude: ['veterans', 'state'] },
+  { startsWith: 'unemployment insurance weekly claims', label: 'Initial jobless claims', time_et: '08:30', exclude: [] },
+  { startsWith: 'advance monthly sales for retail', label: 'Retail sales', time_et: '08:30', exclude: [] },
+  { startsWith: 'gross domestic product', label: 'GDP', time_et: '08:30', exclude: ['state', 'county', 'metro', 'industry', ' by '] },
+  { startsWith: 'personal income and outlays', label: 'PCE / personal income & spending', time_et: '08:30', exclude: ['state', 'county'] },
+  { startsWith: 'job openings and labor turnover', label: 'JOLTS', time_et: '10:00', exclude: ['state'] },
 ];
 
-function todayEastern() {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+const FRED_URL = 'https://api.stlouisfed.org/fred/releases/dates';
+const PAGE_LIMIT = 1000; // FRED's max per request for this endpoint
+const MAX_PAGES = 5;     // a 1-2 week window is normally well under one page
+
+function matchWatchlist(releaseName) {
+  const name = (releaseName || '').toLowerCase().trim();
+  return WATCHLIST.find(
+    (w) => name.startsWith(w.startsWith) && !w.exclude.some((x) => name.includes(x))
+  ) || null;
 }
 
-async function fetchFred(start, end) {
-  const key = (process.env.FRED_API_KEY || '').trim();
-  if (!key) return { ok: false, events: [], error: 'FRED_API_KEY not set in Vercel env vars' };
-
-  // realtime_start bounds which release dates come back. Clamped to today
-  // (ET) so it's never in the future; results are filtered to [start, end]
-  // below regardless. include_release_dates_with_no_data=true is what makes
-  // FRED return SCHEDULED future dates, not just ones already published.
-  const today = todayEastern();
-  const realtimeStart = start < today ? start : today;
-  const collected = [];
-  try {
-    for (let offset = 0, page = 0; page < 5; page++, offset += 1000) {
-      const qs = new URLSearchParams({
-        api_key: key,
-        file_type: 'json',
-        realtime_start: realtimeStart,
-        realtime_end: end,
-        include_release_dates_with_no_data: 'true',
-        order_by: 'release_date',
-        sort_order: 'asc',
-        limit: '1000',
-        offset: String(offset),
-      });
-      const r = await fetch(`https://api.stlouisfed.org/fred/releases/dates?${qs}`);
-      if (!r.ok) {
-        const body = await r.text();
-        return { ok: false, events: [], error: `FRED HTTP ${r.status}: ${body.slice(0, 200)}` };
-      }
-      const j = await r.json();
-      const rows = j.release_dates || [];
-      collected.push(...rows);
-      if (rows.length < 1000) break;
-    }
-  } catch (err) {
-    return { ok: false, events: [], error: `FRED request failed: ${String(err)}` };
-  }
-
-  const events = [];
-  const unmatchedNames = new Set();
-  for (const row of collected) {
-    if (!row.date || row.date < start || row.date > end) continue;
-    const match = FRED_RELEASES.find((m) => m.re.test(row.release_name || ''));
-    if (!match) { unmatchedNames.add(row.release_name); continue; }
-    events.push({
-      event: match.label,
-      date: row.date,
-      time_et: match.time,
-      detail: `Official schedule (FRED: ${row.release_name}); time is the usual release time.`,
-      importance: match.importance,
-      source: 'fred',
+async function fetchFredReleaseDates(apiKey, start, end) {
+  const rows = [];
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const params = new URLSearchParams({
+      api_key: apiKey,
+      file_type: 'json',
+      realtime_start: start,
+      realtime_end: end,
+      include_release_dates_with_no_data: 'true', // needed to see FUTURE scheduled dates
+      order_by: 'release_date',
+      sort_order: 'asc',
+      limit: String(PAGE_LIMIT),
+      offset: String(page * PAGE_LIMIT),
     });
-  }
-  return { ok: true, events, raw_count: collected.length, ignored_release_count: unmatchedNames.size };
-}
-
-// ---------- 2. FOMC ----------
-
-// Source: federalreserve.gov/monetarypolicy/fomccalendars.htm (checked
-// 2026-09-23). Each entry is the DECISION day (second day of the meeting).
-// sep: true = Summary of Economic Projections / dot plot at that meeting.
-// Add the next year's dates here once the Fed publishes them.
-const FOMC_MEETINGS = [
-  { decision: '2026-01-28', sep: false }, { decision: '2026-03-18', sep: true },
-  { decision: '2026-04-29', sep: false }, { decision: '2026-06-17', sep: true },
-  { decision: '2026-07-29', sep: false }, { decision: '2026-09-16', sep: true },
-  { decision: '2026-10-28', sep: false }, { decision: '2026-12-09', sep: true },
-  { decision: '2027-01-27', sep: false }, { decision: '2027-03-17', sep: true },
-  { decision: '2027-04-28', sep: false }, { decision: '2027-06-09', sep: true },
-  { decision: '2027-07-28', sep: false }, { decision: '2027-09-15', sep: true },
-  { decision: '2027-10-27', sep: false }, { decision: '2027-12-08', sep: true },
-];
-
-function addDays(dateStr, n) {
-  const d = new Date(dateStr + 'T00:00:00Z');
-  d.setUTCDate(d.getUTCDate() + n);
-  return d.toISOString().slice(0, 10);
-}
-
-function fomcEvents(start, end) {
-  const events = [];
-  for (const m of FOMC_MEETINGS) {
-    if (m.decision >= start && m.decision <= end) {
-      events.push({
-        event: `FOMC rate decision${m.sep ? ' + projections (dot plot)' : ''}`,
-        date: m.decision,
-        time_et: '14:00',
-        detail: 'Statement 2:00 PM ET, Chair press conference 2:30 PM ET.',
-        importance: 'high',
-        source: 'fomc',
-      });
+    const res = await fetch(`${FRED_URL}?${params}`);
+    if (!res.ok) {
+      const detail = await res.text();
+      const err = new Error(`FRED request failed (${res.status})`);
+      err.detail = detail;
+      throw err;
     }
-    // Minutes come out three weeks after the decision (Wednesday, 2:00 PM ET).
-    const minutes = addDays(m.decision, 21);
-    if (minutes >= start && minutes <= end) {
-      events.push({
-        event: 'FOMC minutes',
-        date: minutes,
-        time_et: '14:00',
-        detail: `Minutes of the ${m.decision} meeting (three weeks after the decision).`,
-        importance: 'medium',
-        source: 'fomc',
-      });
-    }
+    const data = await res.json();
+    const batch = data.release_dates || [];
+    rows.push(...batch);
+    const total = typeof data.count === 'number' ? data.count : rows.length;
+    if (batch.length < PAGE_LIMIT || rows.length >= total) break;
   }
-  const lastKnown = FOMC_MEETINGS[FOMC_MEETINGS.length - 1].decision;
-  return { ok: true, events, stale_warning: end > lastKnown ? `FOMC list ends ${lastKnown} - add next year's dates` : null };
+  return rows;
 }
 
-// ---------- 3. Treasury auctions ----------
-
-async function fetchTreasuryAuctions(start, end) {
-  const qs = new URLSearchParams({
-    fields: 'security_type,security_term,auction_date,announcemt_date,offering_amt,reopening',
-    filter: `auction_date:gte:${start},auction_date:lte:${end},security_type:in:(Note,Bond)`,
-    sort: 'auction_date',
-    'page[size]': '100',
-  });
-  try {
-    const r = await fetch(`https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/accounting/od/auctions_query?${qs}`);
-    if (!r.ok) return { ok: false, events: [], error: `Treasury HTTP ${r.status}` };
-    const j = await r.json();
-    const events = (j.data || []).map((a) => {
-      const amt = Number(a.offering_amt);
-      const amtStr = Number.isFinite(amt) && amt > 0 ? ` - $${(amt / 1e9).toFixed(0)}B` : '';
-      return {
-        event: `${a.security_term} ${a.security_type} auction${a.reopening === 'Yes' ? ' (reopening)' : ''}`,
-        date: a.auction_date,
-        time_et: '13:00',
-        detail: `Announced ${a.announcemt_date}${amtStr}. Results ~1:00 PM ET; a weak auction can move yields.`,
-        importance: /^(10|20|30)-Year/.test(a.security_term || '') ? 'medium' : 'low',
-        source: 'treasury',
-      };
-    });
-    return { ok: true, events };
-  } catch (err) {
-    return { ok: false, events: [], error: `Treasury request failed: ${String(err)}` };
-  }
-}
-
-// ---------- 4. AI search (non-data events only) ----------
-
-const SEARCH_HORIZON_DAYS = 13;
-
-const SEARCH_SYSTEM_PROMPT = `You find SCHEDULED, NON-DATA events that could move
-US equities and rates, within a date window. Economic data releases (jobs,
-CPI, PCE, GDP, claims, durables, PMIs, etc.), FOMC meetings/minutes and
-Treasury auctions are already covered by official feeds - DO NOT include them.
-
-Include, when confirmed for a specific date in the window:
-- Speeches/testimony by the Fed Chair, Vice Chair, or voting FOMC members
-- State visits, summits, trade negotiations, tariff deadlines
-- Foreign central bank decisions (BoJ, ECB, BoE, PBoC, SNB) and BoJ speakers
-- US political events with market relevance (shutdown deadlines, debt ceiling, major votes)
-- Treasury quarterly refunding announcements
-
-Search each of these separately (they rarely appear on the same page):
-1. Fed speakers scheduled this window
-2. Diplomatic/geopolitical events this window - state visits, summits,
-   leader meetings, trade talks, tariff deadlines
-3. Foreign central bank decisions this window
-Only include events with a real, confirmed date - never guess. Return []
-if you genuinely find none.
-
-Multi-day events (a 3-day state visit, a 2-day summit): set "date" to the
-FIRST day and "end_date" to the LAST day, and include the event if ANY of
-its days falls in the window - even if it started before the window. Put
-the market-relevant day (e.g. the summit meeting or state dinner) in
-"detail".
-
-Return ONLY a JSON array, no prose, no markdown fences:
-[{"event": string, "date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD" | null, "time_et": "HH:MM" | null, "detail": string | null, "importance": "high"|"medium"|"low"}]`;
-
-function parseJsonArray(text) {
-  const cleaned = (text || '').replace(/```json|```/g, '').trim();
-  try { const v = JSON.parse(cleaned); return Array.isArray(v) ? v : null; } catch (e) { /* fall through */ }
-  const a = cleaned.indexOf('['), b = cleaned.lastIndexOf(']');
-  if (a !== -1 && b > a) {
-    try { const v = JSON.parse(cleaned.slice(a, b + 1)); return Array.isArray(v) ? v : null; } catch (e) { /* fall through */ }
-  }
-  return null;
-}
-
-async function fetchSearchEvents(start, end) {
-  const searchEnd = end < addDays(start, SEARCH_HORIZON_DAYS) ? end : addDays(start, SEARCH_HORIZON_DAYS);
-  try {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 2000,
-        system: SEARCH_SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: `Window: ${start} to ${searchEnd} (inclusive).` }],
-        // Hard cap on searches per call - the earlier ~192K-token cost spike
-        // came from 12 compounding searches in a single request.
-        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
-      }),
-    });
-    if (!r.ok) return { ok: false, events: [], window_end: searchEnd, error: `Anthropic HTTP ${r.status}` };
-    const j = await r.json();
-    const text = (j.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
-    const arr = parseJsonArray(text);
-    if (!arr) return { ok: false, events: [], window_end: searchEnd, error: 'Search did not return a JSON array' };
-    // Be lenient about date shape (the model sometimes writes a range like
-    // "2026-09-23 to 2026-09-25" in "date"), and keep multi-day events that
-    // OVERLAP the window rather than only ones that start inside it - the
-    // Xi state visit (Sep 23-25) was being lost to exactly these two checks.
-    const firstIso = (v) => (String(v || '').match(/\d{4}-\d{2}-\d{2}/g) || []);
-    let dropped = 0;
-    const events = [];
-    for (const e of arr) {
-      const dates = firstIso(e && e.date);
-      const date = dates[0];
-      const endDate = firstIso(e && e.end_date)[0] || dates[1] || null;
-      const lastDay = endDate && endDate > date ? endDate : date;
-      if (!e || !e.event || !date || lastDay < start || date > searchEnd) { dropped++; continue; }
-      events.push({
-        event: String(e.event),
-        date,
-        end_date: lastDay !== date ? lastDay : null,
-        time_et: e.time_et || null,
-        detail: e.detail || null,
-        importance: ['high', 'medium', 'low'].includes(e.importance) ? e.importance : 'medium',
-        source: 'search',
-      });
-    }
-    return { ok: true, events, window_end: searchEnd, dropped };
-  } catch (err) {
-    return { ok: false, events: [], window_end: searchEnd, error: `Search failed: ${String(err)}` };
-  }
-}
-
-// ---------- handler ----------
-
-const IMPORTANCE_RANK = { high: 0, medium: 1, low: 2 };
+const isIsoDate = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Use POST' });
   }
+
   const { session_date, expiration } = req.body || {};
-  const isDate = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
-  if (!isDate(session_date) || !isDate(expiration) || expiration < session_date) {
-    return res.status(400).json({ error: 'Need session_date and expiration as YYYY-MM-DD, expiration >= session_date' });
+  if (!isIsoDate(session_date) || !isIsoDate(expiration)) {
+    return res.status(400).json({ error: 'session_date and expiration must be YYYY-MM-DD' });
   }
-  const start = session_date;
-  const end = expiration;
+  if (expiration < session_date) {
+    return res.status(400).json({ error: 'expiration is before session_date' });
+  }
 
-  const [fred, treasury, search] = await Promise.all([
-    fetchFred(start, end),
-    fetchTreasuryAuctions(start, end),
-    fetchSearchEvents(start, end),
-  ]);
-  const fomc = fomcEvents(start, end);
+  const apiKey = (process.env.FRED_API_KEY || '').trim();
+  if (!apiKey) {
+    return res.status(500).json({
+      error: 'FRED_API_KEY is not set - add a free FRED API key to Vercel environment variables',
+    });
+  }
 
-  const all = [...fred.events, ...fomc.events, ...treasury.events, ...search.events];
-  const seen = new Set();
-  const macro_events = all
-    .filter((e) => {
-      const k = `${e.date}|${e.event.toLowerCase()}`;
-      if (seen.has(k)) return false;
-      seen.add(k);
-      return true;
-    })
-    .sort((a, b) =>
-      a.date.localeCompare(b.date) ||
-      (a.time_et || '99:99').localeCompare(b.time_et || '99:99') ||
-      IMPORTANCE_RANK[a.importance] - IMPORTANCE_RANK[b.importance]);
+  try {
+    const rows = await fetchFredReleaseDates(apiKey, session_date, expiration);
 
-  const status = (s) => ({ ok: s.ok, count: s.events.length, ...(s.error ? { error: s.error } : {}) });
-  return res.status(200).json({
-    macro_events,
-    range: { start, end },
-    sources: {
-      fred: status(fred),
-      fomc: { ...status(fomc), ...(fomc.stale_warning ? { warning: fomc.stale_warning } : {}) },
-      treasury: status(treasury),
-      search: { ...status(search), window_end: search.window_end, dropped: search.dropped ?? 0 },
-    },
-  });
+    const seen = new Set();
+    const macroEvents = [];
+    for (const row of rows) {
+      const date = row.date;
+      if (!isIsoDate(date) || date < session_date || date > expiration) continue;
+      const w = matchWatchlist(row.release_name);
+      if (!w) continue;
+      const key = `${w.label}|${date}`;
+      if (seen.has(key)) continue; // same event matched by more than one FRED release name
+      seen.add(key);
+      macroEvents.push({
+        event: w.label,
+        date,
+        time_et: w.time_et,
+        detail: `FRED release: ${row.release_name}. Time is the typical release time, not confirmed.`,
+      });
+    }
+
+    macroEvents.sort((a, b) => (a.date + a.time_et).localeCompare(b.date + b.time_et));
+
+    return res.status(200).json({
+      macro_events: macroEvents,
+      source: 'fred',
+      window: { start: session_date, end: expiration },
+      fred_rows_scanned: rows.length,
+      coverage_note: 'FRED-only: ISM PMI, Treasury auctions and BoJ are not covered; times are typical, not confirmed.',
+    });
+  } catch (err) {
+    return res.status(502).json({
+      error: 'FRED macro calendar fetch failed',
+      detail: err.detail || String(err),
+    });
+  }
 }
