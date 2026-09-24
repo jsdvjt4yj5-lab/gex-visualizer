@@ -114,6 +114,7 @@ var array<float>  plTgt   = array.new<float>()
 var array<float>  plStop  = array.new<float>()
 var array<float>  plInv   = array.new<float>()
 var array<string> plInfo  = array.new<string>()
+var array<string> plQty   = array.new<string>()
 
 if barstate.isfirst
     for raw in str.split(data, "\n")
@@ -132,6 +133,11 @@ if barstate.isfirst
             plStop.push(f.size() > 5 ? str.tonumber(f.get(5)) : na)
             plInv.push(f.size() > 6 ? str.tonumber(f.get(6)) : na)
             plInfo.push(f.size() > 7 ? f.get(7) : "")
+            // "7x · 0DTE" / "7x · exp 09-25" (fields 9-10, optional)
+            q = f.size() > 8 ? f.get(8) : ""
+            ex = f.size() > 9 ? f.get(9) : ""
+            exTxt = ex == "" ? "" : ex == hdrDate ? "0DTE" : "exp " + (str.length(ex) >= 10 ? str.substring(ex, 5, 10) : ex)
+            plQty.push((q == "" ? "" : q + "x") + (q != "" and exTxt != "" ? " · " : "") + exTxt)
         else if f.size() >= 3
             px = str.tonumber(f.get(1))
             if na(px)
@@ -247,12 +253,12 @@ if showStatus and barstate.islast
 // entry - see the PDF for the premium-based exits).
 fmtPx(float x) => na(x) ? "-" : str.tostring(x, "#.##")
 var table plans = table.new(plansPos == "top right" ? position.top_right : plansPos == "bottom left" ? position.bottom_left :
-     plansPos == "top left" ? position.top_left : position.middle_right, 7, 11,
+     plansPos == "top left" ? position.top_left : position.middle_right, 8, 11,
      bgcolor = color.new(#131722, 5), border_color = color.new(#363A45, 0), border_width = 1)
 if showPlans and barstate.islast and plName.size() > 0
-    table.clear(plans, 0, 0, 6, 10)  // drop cells left over from the wider layout
-    hdr = plansFull ? array.from("Plan", "Entry", "50% tgt", "Stop", "Inval", "Trade", "vs entry") :
-         array.from("Plan", "Entry", "50% tgt", "Stop", "vs entry")
+    table.clear(plans, 0, 0, 7, 10)  // drop cells left over from the wider layout
+    hdr = plansFull ? array.from("Plan", "Contracts", "Entry", "50% tgt", "Stop", "Inval", "Trade", "vs entry") :
+         array.from("Plan", "Contracts", "Entry", "50% tgt", "Stop", "vs entry")
     for c = 0 to hdr.size() - 1
         table.cell(plans, c, 0, hdr.get(c), text_color = color.gray, text_size = size.small)
     for i = 0 to math.min(plName.size(), 10) - 1
@@ -265,13 +271,14 @@ if showPlans and barstate.islast and plName.size() > 0
         color rowBg = selected ? color.new(color.white, 88) : na
         color nameCol = planSel == "All" or selected ? color.white : color.gray
         table.cell(plans, 0, r, plName.get(i), text_color = nameCol, bgcolor = rowBg, text_size = size.small, text_halign = text.align_left)
-        table.cell(plans, 1, r, fmtPx(e), text_color = cEntry, bgcolor = rowBg, text_size = size.small)
-        table.cell(plans, 2, r, fmtPx(plTgt.get(i)), text_color = cTarget, bgcolor = rowBg, text_size = size.small)
-        table.cell(plans, 3, r, fmtPx(plStop.get(i)), text_color = cStopPx, bgcolor = rowBg, text_size = size.small)
+        table.cell(plans, 1, r, plQty.size() > i ? plQty.get(i) : "-", text_color = color.white, bgcolor = rowBg, text_size = size.small)
+        table.cell(plans, 2, r, fmtPx(e), text_color = cEntry, bgcolor = rowBg, text_size = size.small)
+        table.cell(plans, 3, r, fmtPx(plTgt.get(i)), text_color = cTarget, bgcolor = rowBg, text_size = size.small)
+        table.cell(plans, 4, r, fmtPx(plStop.get(i)), text_color = cStopPx, bgcolor = rowBg, text_size = size.small)
         if plansFull
-            table.cell(plans, 4, r, fmtPx(plInv.get(i)), text_color = cInval, bgcolor = rowBg, text_size = size.small)
-            table.cell(plans, 5, r, plInfo.get(i), text_color = color.silver, bgcolor = rowBg, text_size = size.small, text_halign = text.align_left)
-        table.cell(plans, plansFull ? 6 : 4, r, dist, text_color = color.white, bgcolor = na(distBg) ? rowBg : distBg, text_size = size.small)
+            table.cell(plans, 5, r, fmtPx(plInv.get(i)), text_color = cInval, bgcolor = rowBg, text_size = size.small)
+            table.cell(plans, 6, r, plInfo.get(i), text_color = color.silver, bgcolor = rowBg, text_size = size.small, text_halign = text.align_left)
+        table.cell(plans, plansFull ? 7 : 5, r, dist, text_color = color.white, bgcolor = na(distBg) ? rowBg : distBg, text_size = size.small)
 
 // ── Alerts: one TradingView alert covers every plan and every event.
 // Create it with Condition = "C&T" -> "Any alert() function call".
