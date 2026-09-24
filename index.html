@@ -3471,8 +3471,10 @@ function buildPineScript(output, input) {
   const date = input?.session_date || todayEasternDateStr();
   const gex = input?.gex_data || {};
   const levels = []; // {group, price, text, color, width, style}
-  const add = (group, price, text, color, width = 1, style = 'solid') => {
-    if (typeof price === 'number' && Number.isFinite(price)) levels.push({ group, price: +price.toFixed(2), text, color, width, style });
+  // `short` = compact chart label used by the permanent C&T Levels indicator
+  // (strategy names go in its legend instead of on every line).
+  const add = (group, price, text, color, width = 1, style = 'solid', short = text) => {
+    if (typeof price === 'number' && Number.isFinite(price)) levels.push({ group, price: +price.toFixed(2), text, color, width, style, short });
   };
 
   // Walls + flip
@@ -3494,27 +3496,28 @@ function buildPineScript(output, input) {
   const th = output.trade_thesis || {};
   const bcl = th.base_case_levels || [];
   if (bcl.length >= 2) {
-    add('thesis', Math.min(...bcl), 'Base case low', 'color.blue', 1, 'dotted');
-    add('thesis', Math.max(...bcl), 'Base case high', 'color.blue', 1, 'dotted');
+    add('thesis', Math.min(...bcl), 'Base case low', 'color.blue', 1, 'dotted', 'Base low');
+    add('thesis', Math.max(...bcl), 'Base case high', 'color.blue', 1, 'dotted', 'Base high');
   }
-  (th.upside_break?.target_levels || []).forEach((p) => add('thesis', p, `Upside target ${p}`, 'color.blue', 1, 'dashed'));
-  (th.downside_break?.target_levels || []).forEach((p) => add('thesis', p, `Downside target ${p}`, 'color.blue', 1, 'dashed'));
+  (th.upside_break?.target_levels || []).forEach((p) => add('thesis', p, `Upside target ${p}`, 'color.blue', 1, 'dashed', `Up tgt ${p}`));
+  (th.downside_break?.target_levels || []).forEach((p) => add('thesis', p, `Downside target ${p}`, 'color.blue', 1, 'dashed', `Down tgt ${p}`));
   // Implied move
   const im = output.volatility_check?.implied_move;
   if (im?.expected_range_usd) {
-    add('implied', im.expected_range_usd.low, `Implied 1σ low`, 'color.silver', 1, 'dotted');
-    add('implied', im.expected_range_usd.high, `Implied 1σ high`, 'color.silver', 1, 'dotted');
+    add('implied', im.expected_range_usd.low, `Implied 1σ low`, 'color.silver', 1, 'dotted', '1σ low');
+    add('implied', im.expected_range_usd.high, `Implied 1σ high`, 'color.silver', 1, 'dotted', '1σ high');
   }
   // Strategy triggers + breakevens
   (output.strategies || []).forEach((s, i) => {
     const tag = `S${i + 1} ${s.name}`;
-    add('triggers', s.entry_level, `${tag} entry`, 'color.lime', 1, 'dashed');
-    add('triggers', s.invalidation_level, `${tag} invalidation`, 'color.maroon', 1, 'dashed');
+    const n = `S${i + 1}`;
+    add('triggers', s.entry_level, `${tag} entry`, 'color.lime', 1, 'dashed', `${n} entry`);
+    add('triggers', s.invalidation_level, `${tag} invalidation`, 'color.maroon', 1, 'dashed', `${n} inval`);
     (s.profit_target_50pct?.underlying_levels || []).forEach((lv) =>
-      add('exits', lv, `${tag} 50% target (if hit soon)`, 'color.aqua', 1, 'dashed'));
+      add('exits', lv, `${tag} 50% target (if hit soon)`, 'color.aqua', 1, 'dashed', `${n} 50%`));
     (s.stop_loss?.underlying_levels || []).forEach((lv) =>
-      add('exits', lv, `${tag} price stop`, 'color.fuchsia', 1, 'dashed'));
-    ctBreakeven(s).forEach((be) => add('strategies', be, `${tag} breakeven`, 'color.gray', 1, 'dotted'));
+      add('exits', lv, `${tag} price stop`, 'color.fuchsia', 1, 'dashed', `${n} stop`));
+    ctBreakeven(s).forEach((be) => add('strategies', be, `${tag} breakeven`, 'color.gray', 1, 'dotted', `${n} BE`));
   });
 
   // Merge labels that land on the same price within a group; keep the
@@ -3522,7 +3525,7 @@ function buildPineScript(output, input) {
   const merged = [];
   levels.forEach((lv) => {
     const hit = merged.find((m) => m.group === lv.group && m.price === lv.price);
-    if (hit) { hit.text += ' / ' + lv.text; hit.width = Math.max(hit.width, lv.width); }
+    if (hit) { hit.text += ' / ' + lv.text; hit.short += ' / ' + lv.short; hit.width = Math.max(hit.width, lv.width); }
     else merged.push({ ...lv });
   });
   const MAX_LINES = 40;
@@ -3625,8 +3628,10 @@ function buildCtLevelsText(output, input) {
   drawn.forEach((d) => {
     // Breakevens share the MA colour, so their code comes from the group.
     const code = d.group === 'strategies' ? 'BE' : (CT_LEVEL_CODES[d.color] || 'M');
-    lines.push(`${code}|${d.price}|${clean(d.text)}|${d.width}|${d.labelOffset || 2}`);
+    lines.push(`${code}|${d.price}|${clean(d.short || d.text)}|${d.width}|${d.labelOffset || 2}`);
   });
+  // Legend: full strategy names, shown once in the indicator's status box.
+  (output.strategies || []).forEach((s, i) => lines.push(`L|${i + 1}|${clean(s.name)}`));
   return { text: lines.join('\n'), count: drawn.length };
 }
 

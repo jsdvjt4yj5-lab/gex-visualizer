@@ -32,7 +32,9 @@ gT = input.bool(true, "Thesis range + targets", group = gs)
 gI = input.bool(false, "Implied 1-sigma range", group = gs)
 gB = input.bool(false, "Strategy breakevens", group = gs)
 showLabels = input.bool(true, "Labels", group = gs)
-labelSize  = input.string("normal", "Label size", options = ["small", "normal", "large"], group = gs)
+labelSize  = input.string("small", "Label size", options = ["small", "normal", "large"], group = gs)
+crowdGap   = input.float(0.5, "Stagger labels closer than (points)", minval = 0, step = 0.1, group = gs,
+     tooltip = "Labels whose prices are this close get pushed sideways so they don't overlap. Raise it if labels still collide when zoomed out.")
 showStatus = input.bool(true, "Status box (date / freshness check)", group = gs)
 
 gc = "Colours"
@@ -94,6 +96,7 @@ var array<int>    offs   = array.new<int>()
 var string hdrDate   = ""
 var string hdrTicker = ""
 var int    badLines  = 0
+var array<string> legend = array.new<string>()
 
 if barstate.isfirst
     for raw in str.split(data, "\n")
@@ -104,6 +107,8 @@ if barstate.isfirst
         if f.size() >= 3 and f.get(0) == "CT"
             hdrDate   := f.get(1)
             hdrTicker := f.get(2)
+        else if f.size() >= 3 and f.get(0) == "L"
+            legend.push("S" + f.get(1) + "  " + f.get(2))
         else if f.size() >= 3
             px = str.tonumber(f.get(1))
             if na(px)
@@ -125,21 +130,46 @@ if barstate.isfirst
                 line.new(bar_index, prices.get(i), bar_index + 1, prices.get(i), extend = extend.both,
                      color = codeColor(c), width = widths.get(i), style = codeStyle(c))
 
-// ── Labels at the right edge (recreated on the last bar so they follow price)
+// ── Labels at the right edge (recreated on the last bar so they follow price).
+// Levels at the SAME price are merged into one label ("766 -195M · Base low
+// · S2 entry") and nearby ones are staggered sideways, so nothing overlaps.
 var label[] labs = array.new<label>()
 if barstate.islast
     for l in labs
         l.delete()
     labs.clear()
     if showLabels and codes.size() > 0
+        vp = array.new<float>()
+        vt = array.new<string>()
+        vc = array.new<color>()
+        seen = map.new<float, int>()
         for i = 0 to codes.size() - 1
             c = codes.get(i)
             if codeOn(c)
-                labs.push(label.new(bar_index + offs.get(i), prices.get(i), texts.get(i), style = label.style_label_left,
-                     color = color.new(codeColor(c), 10), textcolor = color.black, size = lblSize))
+                px = prices.get(i)
+                if seen.contains(px)
+                    k = seen.get(px)
+                    vt.set(k, vt.get(k) + " · " + texts.get(i))
+                else
+                    seen.put(px, vp.size())
+                    vp.push(px)
+                    vt.push(texts.get(i))
+                    vc.push(codeColor(c))
+        if vp.size() > 0
+            idx = vp.sort_indices(order.ascending)
+            float prevPx = na
+            int prevOff = 0
+            for j = 0 to idx.size() - 1
+                k = idx.get(j)
+                px = vp.get(k)
+                off = not na(prevPx) and px - prevPx < crowdGap ? (prevOff >= 38 ? 2 : prevOff + 18) : 2
+                labs.push(label.new(bar_index + off, px, vt.get(k), style = label.style_label_left,
+                     color = color.new(vc.get(k), 10), textcolor = color.black, size = lblSize))
+                prevPx := px
+                prevOff := off
 
 // ── Status box: is this today's data, for this ticker?
-var table status = table.new(position.bottom_right, 1, 2, bgcolor = color.new(#131722, 10),
+var table status = table.new(position.bottom_right, 1, 12, bgcolor = color.new(#131722, 10),
      border_color = color.new(#363A45, 0), border_width = 1)
 if showStatus and barstate.islast
     today = str.format_time(timenow, "yyyy-MM-dd", TZ)
@@ -159,3 +189,8 @@ if showStatus and barstate.islast
     table.cell(status, 0, 0, "C&T " + hdrDate, text_color = color.gray, text_size = size.small)
     table.cell(status, 0, 1, msg + (badLines > 0 ? " | " + str.tostring(badLines) + " unreadable line(s)" : ""),
          text_color = color.white, bgcolor = bg, text_size = size.small)
+    // Strategy legend (labels on the chart only say S1 / S2 / S3)
+    if legend.size() > 0
+        for i = 0 to math.min(legend.size(), 10) - 1
+            table.cell(status, 0, 2 + i, legend.get(i), text_color = color.silver, text_size = size.small,
+                 text_halign = text.align_left)
