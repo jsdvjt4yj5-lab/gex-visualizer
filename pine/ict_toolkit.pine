@@ -1,0 +1,544 @@
+//@version=6
+// ICT Toolkit - intraday, killzone-timed. Pure price/liquidity (no GEX).
+//
+// ICT concepts have no single official definition, so every one of them is
+// pinned to an explicit, mechanical rule here (see each section). That makes
+// the marks reproducible, not "correct" - treat them as a structured way of
+// reading price, not as signals. None of this has peer-reviewed backing.
+//
+// SPY NOTE: SPY only trades 04:00-20:00 ET, so the Asia killzone has no SPY
+// bars and London only overlaps 04:00-05:00. For the full overnight session
+// model use ES1! (S&P futures); on SPY lean on pre-market, NY open and PDH/PDL.
+
+indicator("ICT Toolkit", "ICT", overlay = true, max_bars_back = 500,
+     max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+TZ = "America/New_York"
+
+// ─────────────────────────────────────────────── Killzones
+g1 = "Killzones (New York time)"
+showKZ  = input.bool(true, "Shade killzones", group = g1)
+useAsia = input.bool(false, "Asia", inline = "a", group = g1)
+sAsia   = input.session("2000-0000", "", inline = "a", group = g1)
+useLon  = input.bool(true, "London open", inline = "l", group = g1)
+sLon    = input.session("0200-0500", "", inline = "l", group = g1)
+useNYAM = input.bool(true, "New York open", inline = "n", group = g1)
+sNYAM   = input.session("0700-1000", "", inline = "n", group = g1)
+useLC   = input.bool(false, "London close", inline = "c", group = g1)
+sLC     = input.session("1000-1200", "", inline = "c", group = g1)
+useNYPM = input.bool(false, "New York PM", inline = "p", group = g1)
+sNYPM   = input.session("1330-1600", "", inline = "p", group = g1)
+
+inSess(string s) => not na(time(timeframe.period, s, TZ))
+isIntra = timeframe.isintraday
+inAsia  = inSess(sAsia)
+inLon   = inSess(sLon)
+inNYAM  = inSess(sNYAM)
+inLC    = inSess(sLC)
+inNYPM  = inSess(sNYPM)
+inAnyKZ = (useAsia and inAsia) or (useLon and inLon) or (useNYAM and inNYAM) or (useLC and inLC) or (useNYPM and inNYPM)
+
+bgcolor(showKZ and isIntra and useAsia and inAsia ? color.new(#78909C, 90) : na, title = "Asia")
+bgcolor(showKZ and isIntra and useLon and inLon ? color.new(#5C6BC0, 90) : na, title = "London open")
+bgcolor(showKZ and isIntra and useNYAM and inNYAM ? color.new(#26A69A, 90) : na, title = "New York open")
+bgcolor(showKZ and isIntra and useLC and inLC ? color.new(#AB47BC, 92) : na, title = "London close")
+bgcolor(showKZ and isIntra and useNYPM and inNYPM ? color.new(#FFA726, 92) : na, title = "New York PM")
+
+// ─────────────────────────────────────────────── Liquidity (BSL / SSL)
+// Rule: a high/low is a liquidity pool until price trades through it.
+// "swept" = traded through AND the bar closed back on the original side
+// (stop run + rejection). "taken" = traded through and closed beyond.
+g2 = "Liquidity (BSL above highs / SSL below lows)"
+showPre   = input.bool(true, "Pre-market high/low (04:00-09:30)", group = g2)
+showAL    = input.bool(false, "Asia + London highs/lows (futures)", group = g2)
+showPDHL  = input.bool(true, "Previous day high/low", group = g2)
+showSwing = input.bool(true, "Swing highs/lows", group = g2)
+swingLen  = input.int(5, "Swing strength (bars each side)", minval = 2, maxval = 20, group = g2)
+maxLiq    = input.int(30, "Max liquidity lines kept", minval = 5, maxval = 100, group = g2)
+cBSL      = input.color(color.rgb(255, 183, 77), "Buy-side colour", group = g2)
+cSSL      = input.color(color.rgb(79, 195, 247), "Sell-side colour", group = g2)
+
+type Liq
+    line  ln
+    label tag
+    string txt
+    float price
+    bool  isHigh
+    bool  done
+
+var array<Liq> liqs = array.new<Liq>()
+
+addLiq(float price, bool isHigh, int x1, string txt) =>
+    if not na(price)
+        col = isHigh ? cBSL : cSSL
+        ln  = line.new(x1, price, bar_index, price, color = col, width = 1)
+        label tg = na
+        if txt != ""
+            tg := label.new(bar_index + 2, price, txt, style = label.style_label_left,
+                 color = color.new(col, 15), textcolor = color.black, size = size.small)
+        liqs.push(Liq.new(ln, tg, txt, price, isHigh, false))
+        if liqs.size() > maxLiq
+            old = liqs.shift()
+            old.ln.delete()
+            if not na(old.tag)
+                old.tag.delete()
+
+// Session range tracker: running high/low while inside the session,
+// "ended" is true on the first bar after it closes.
+sessRange(bool inS) =>
+    var float h  = na
+    var float l  = na
+    var int   x0 = na
+    if inS and not inS[1]
+        h  := high
+        l  := low
+        x0 := bar_index
+    else if inS
+        h := math.max(h, high)
+        l := math.min(l, low)
+    [h, l, x0, not inS and inS[1]]
+
+inPre = inSess("0400-0930")
+[pH, pL, pX, pEnd] = sessRange(inPre)
+[aH, aL, aX, aEnd] = sessRange(inAsia)
+[lH, lL, lX, lEnd] = sessRange(inLon)
+
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+
+newDay = timeframe.change("D")
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+
+if isIntra
+    if showPre and pEnd
+        addLiq(pH, true, pX, "Pre-mkt H")
+        addLiq(pL, false, pX, "Pre-mkt L")
+    if showAL and aEnd
+        addLiq(aH, true, aX, "Asia H")
+        addLiq(aL, false, aX, "Asia L")
+    if showAL and lEnd
+        addLiq(lH, true, lX, "London H")
+        addLiq(lL, false, lX, "London L")
+    if showPDHL and newDay
+        addLiq(pdh, true, bar_index, "PDH")
+        addLiq(pdl, false, bar_index, "PDL")
+    if showSwing and not na(ph)
+        addLiq(ph, true, bar_index - swingLen, "")
+    if showSwing and not na(pl)
+        addLiq(pl, false, bar_index - swingLen, "")
+
+bslSwept = false
+sslSwept = false
+for lq in liqs
+    if not lq.done
+        lq.ln.set_x2(bar_index)
+        if not na(lq.tag)
+            lq.tag.set_x(bar_index + 2)
+        hit = lq.isHigh ? high > lq.price : low < lq.price
+        if hit
+            lq.done := true
+            rejected = lq.isHigh ? close < lq.price : close > lq.price
+            lq.ln.set_style(line.style_dotted)
+            lq.ln.set_color(color.new(lq.isHigh ? cBSL : cSSL, 55))
+            if not na(lq.tag)
+                lq.tag.set_text(lq.txt + (rejected ? " swept" : " taken"))
+                lq.tag.set_color(color.new(lq.isHigh ? cBSL : cSSL, 60))
+            if rejected
+                if lq.isHigh
+                    bslSwept := true
+                else
+                    sslSwept := true
+
+plotshape(bslSwept, "BSL swept", shape.triangledown, location.abovebar, cBSL, size = size.tiny)
+plotshape(sslSwept, "SSL swept", shape.triangleup, location.belowbar, cSSL, size = size.tiny)
+
+// ─────────────────────────────────────────────── Structure + order blocks
+// Rule: swing points are the pivots above. A candle CLOSE beyond the latest
+// unbroken swing high/low is a break. It's a CHoCH if it's against the prior
+// break direction, otherwise a BOS.
+// Order block rule: on a bullish break, the last down-close candle between
+// the swing low and the break (bearish mirror for bearish breaks). It stays
+// active until a close through its far side.
+g3 = "Market structure + order blocks"
+showMS = input.bool(true, "BOS / CHoCH", group = g3)
+showOB = input.bool(true, "Order blocks", group = g3)
+maxOB  = input.int(10, "Max order blocks kept", minval = 1, maxval = 50, group = g3)
+kzOnly = input.bool(false, "Only mark new OBs / FVGs inside enabled killzones", group = g3)
+cBull  = input.color(color.rgb(38, 198, 166), "Bullish colour", group = g3)
+cBear  = input.color(color.rgb(255, 82, 82), "Bearish colour", group = g3)
+
+type Zone
+    box  bx
+    bool bull
+    bool live
+
+var array<Zone> obs = array.new<Zone>()
+
+addZone(array<Zone> arr, int x1, float top, float bot, bool bull, int cap) =>
+    col = bull ? cBull : cBear
+    b = box.new(x1, top, bar_index, bot, border_color = color.new(col, 40), bgcolor = color.new(col, 82))
+    arr.push(Zone.new(b, bull, true))
+    if arr.size() > cap
+        old = arr.shift()
+        old.bx.delete()
+
+var float shP = na
+var int   shX = na
+var bool  shOpen = false
+var float slP = na
+var int   slX = na
+var bool  slOpen = false
+var int   trend = 0
+
+if not na(ph)
+    shP := ph
+    shX := bar_index - swingLen
+    shOpen := true
+if not na(pl)
+    slP := pl
+    slX := bar_index - swingLen
+    slOpen := true
+
+allowNew = isIntra and (not kzOnly or inAnyKZ)
+structUp = false
+structDn = false
+
+if shOpen and close > shP
+    isChoch = trend == -1
+    trend := 1
+    shOpen := false
+    structUp := true
+    if showMS
+        line.new(shX, shP, bar_index, shP, color = cBull, style = line.style_dashed)
+        label.new(math.round((shX + bar_index) / 2), shP, isChoch ? "CHoCH" : "BOS",
+             style = label.style_label_down, color = color.new(cBull, 100), textcolor = cBull, size = size.small)
+    if showOB and allowNew and not na(slX)
+        lookback = math.min(bar_index - slX, 50)
+        if lookback >= 1
+            for i = 1 to lookback
+                if close[i] < open[i]
+                    addZone(obs, bar_index - i, high[i], low[i], true, maxOB)
+                    break
+
+if slOpen and close < slP
+    isChoch = trend == 1
+    trend := -1
+    slOpen := false
+    structDn := true
+    if showMS
+        line.new(slX, slP, bar_index, slP, color = cBear, style = line.style_dashed)
+        label.new(math.round((slX + bar_index) / 2), slP, isChoch ? "CHoCH" : "BOS",
+             style = label.style_label_up, color = color.new(cBear, 100), textcolor = cBear, size = size.small)
+    if showOB and allowNew and not na(shX)
+        lookback = math.min(bar_index - shX, 50)
+        if lookback >= 1
+            for i = 1 to lookback
+                if close[i] > open[i]
+                    addZone(obs, bar_index - i, high[i], low[i], false, maxOB)
+                    break
+
+for o in obs
+    if o.live
+        o.bx.set_right(bar_index)
+        broken = o.bull ? close < o.bx.get_bottom() : close > o.bx.get_top()
+        if broken
+            o.live := false
+            o.bx.set_bgcolor(color.new(color.gray, 92))
+            o.bx.set_border_color(color.new(color.gray, 75))
+
+// ─────────────────────────────────────────────── Fair value gaps
+// Rule: bullish FVG = this bar's low is above the high from two bars ago;
+// bearish = this bar's high is below the low from two bars ago. Gaps
+// smaller than the ATR filter are ignored as noise.
+g4 = "Fair value gaps"
+showFVG    = input.bool(true, "Fair value gaps", group = g4)
+fvgMin     = input.float(0.1, "Min size (x ATR 14)", minval = 0, step = 0.05, group = g4)
+fvgFill    = input.string("Full", "Mitigated when filled to", options = ["Full", "Midpoint (CE)"], group = g4)
+hideFilled = input.bool(true, "Remove mitigated gaps", group = g4)
+maxFVG     = input.int(20, "Max gaps kept", minval = 1, maxval = 100, group = g4)
+
+var array<Zone> gaps = array.new<Zone>()
+atr = ta.atr(14)
+newBullFVG = showFVG and allowNew and low > high[2] and (low - high[2]) >= fvgMin * atr
+newBearFVG = showFVG and allowNew and high < low[2] and (low[2] - high) >= fvgMin * atr
+if newBullFVG
+    addZone(gaps, bar_index - 2, low, high[2], true, maxFVG)
+if newBearFVG
+    addZone(gaps, bar_index - 2, low[2], high, false, maxFVG)
+
+for g in gaps
+    if g.live
+        top = g.bx.get_top()
+        bot = g.bx.get_bottom()
+        lvl = fvgFill == "Full" ? (g.bull ? bot : top) : (top + bot) / 2
+        filled = g.bull ? low <= lvl : high >= lvl
+        if filled
+            g.live := false
+            if hideFilled
+                g.bx.delete()
+            else
+                g.bx.set_bgcolor(color.new(color.gray, 92))
+                g.bx.set_border_color(color.new(color.gray, 80))
+        else
+            g.bx.set_right(bar_index)
+
+// ─────────────────────────────────────────────── Premium / discount + OTE
+// Rule: the dealing range is the latest swing high and swing low. 50% =
+// equilibrium (above = premium, below = discount). OTE = the 62-79%
+// retracement of that leg: below the high after an up-leg, above the low
+// after a down-leg.
+g5 = "Premium / discount + OTE"
+showRange = input.bool(true, "Equilibrium + OTE zone of current range", group = g5)
+
+var line eqLn  = na
+var box  oteBx = na
+if showRange and isIntra and not na(shP) and not na(slP) and shP > slP
+    x0  = math.min(shX, slX)
+    eq  = (shP + slP) / 2
+    rng = shP - slP
+    upLeg  = slX < shX
+    oteTop = upLeg ? shP - 0.62 * rng : slP + 0.79 * rng
+    oteBot = upLeg ? shP - 0.79 * rng : slP + 0.62 * rng
+    if na(eqLn)
+        eqLn  := line.new(x0, eq, bar_index + 10, eq, color = color.gray, style = line.style_dashed)
+        oteBx := box.new(x0, oteTop, bar_index + 10, oteBot, border_color = color.new(color.yellow, 60),
+             bgcolor = color.new(color.yellow, 90), text = "OTE 62-79%", text_color = color.yellow,
+             text_size = size.small, text_halign = text.align_right)
+    else
+        eqLn.set_xy1(x0, eq)
+        eqLn.set_xy2(bar_index + 10, eq)
+        oteBx.set_lefttop(x0, oteTop)
+        oteBx.set_rightbottom(bar_index + 10, oteBot)
+
+// ─────────────────────────────────────────────── Trade setups
+// Rule-based model (long; short is the mirror):
+//   1. Sell-side liquidity is swept (wick through, close back) inside the
+//      NY open killzone window (the "New York open" session above).
+//   2. Within N bars, a bullish BOS/CHoCH AND a bullish FVG both print.
+//   3. Plan: entry = FVG top (or midpoint), stop = sweep extreme minus a
+//      small ATR buffer, target = nearest untouched buy-side liquidity above.
+//   4. Only shown when reward:risk >= the minimum.
+// It then tracks: armed -> filled -> target hit / stopped, or expired if
+// not filled before the window ends (or if price runs to target unfilled).
+// These are rules lining up, not recommendations - backtest before trusting.
+g6 = "Trade setups (sweep -> shift -> FVG)"
+showSetups = input.bool(true, "Show setups", group = g6)
+shiftBars  = input.int(15, "Max bars from sweep to shift + FVG", minval = 3, maxval = 60, group = g6)
+entryMode  = input.string("FVG edge", "Entry", options = ["FVG edge", "FVG midpoint"], group = g6)
+minRR      = input.float(2.0, "Minimum reward:risk", minval = 0.5, step = 0.25, group = g6)
+stopBuf    = input.float(0.1, "Stop buffer (x ATR 14)", minval = 0, step = 0.05, group = g6)
+cSetE      = input.color(color.white, "Entry line", group = g6)
+cSetS      = input.color(color.rgb(255, 82, 82), "Stop line", group = g6)
+cSetT      = input.color(color.rgb(38, 198, 166), "Target line", group = g6)
+
+type Setup
+    bool   isLong
+    int    state    = 0
+    float  sweepPx
+    int    sweepBar
+    bool   gotShift = false
+    bool   gotFvg   = false
+    float  fvgTop
+    float  fvgBot
+    float  entry
+    float  stop
+    float  target
+    string tgtName
+    float  rr
+    line   lE
+    line   lS
+    line   lT
+    label  lb
+
+method planText(Setup s, string status) =>
+    (s.isLong ? "Long" : "Short") + ": entry " + str.tostring(s.entry, format.mintick) +
+     " | stop " + str.tostring(s.stop, format.mintick) +
+     " | target " + str.tostring(s.target, format.mintick) + " (" + s.tgtName + ")" +
+     " | " + str.tostring(s.rr, "#.#") + "R | " + status
+
+method finish(Setup s, string status) =>
+    s.lb.set_text(s.planText(status))
+    s.lb.set_color(color.new(color.gray, 30))
+    s.state    := 0
+    s.gotShift := false
+    s.gotFvg   := false
+
+// state: 0 idle, 1 swept (waiting for shift + FVG), 2 armed, 3 filled
+method step(Setup s, bool swept, float sweepExtreme, bool shift, bool fvg, float fTop, float fBot, bool inWin) =>
+    string ev = ""
+    if (s.state == 0 or s.state == 1) and swept and inWin
+        s.state    := 1
+        s.sweepPx  := sweepExtreme
+        s.sweepBar := bar_index
+        s.gotShift := false
+        s.gotFvg   := false
+    if s.state == 1
+        s.sweepPx := s.isLong ? math.min(s.sweepPx, low) : math.max(s.sweepPx, high)
+        if bar_index - s.sweepBar > shiftBars
+            s.state := 0
+        else
+            if shift
+                s.gotShift := true
+            if fvg
+                s.gotFvg := true
+                s.fvgTop := fTop
+                s.fvgBot := fBot
+            if s.gotShift and s.gotFvg
+                s.entry := entryMode == "FVG edge" ? (s.isLong ? s.fvgTop : s.fvgBot) : (s.fvgTop + s.fvgBot) / 2
+                s.stop  := s.isLong ? s.sweepPx - stopBuf * atr : s.sweepPx + stopBuf * atr
+                float best = na
+                string bestName = ""
+                for lq in liqs
+                    if not lq.done and lq.isHigh == s.isLong
+                        beyond = s.isLong ? lq.price > s.entry : lq.price < s.entry
+                        closer = na(best) or (s.isLong ? lq.price < best : lq.price > best)
+                        if beyond and closer
+                            best     := lq.price
+                            bestName := lq.txt == "" ? (s.isLong ? "swing high" : "swing low") : lq.txt
+                risk = math.abs(s.entry - s.stop)
+                if na(best) or risk <= 0
+                    s.state := 0
+                else
+                    s.target  := best
+                    s.tgtName := bestName
+                    s.rr      := math.abs(best - s.entry) / risk
+                    if s.rr >= minRR
+                        s.state := 2
+                        x2 = bar_index + 15
+                        s.lE := line.new(bar_index, s.entry, x2, s.entry, color = cSetE, width = 2)
+                        s.lS := line.new(bar_index, s.stop, x2, s.stop, color = cSetS, width = 2, style = line.style_dashed)
+                        s.lT := line.new(bar_index, s.target, x2, s.target, color = cSetT, width = 2, style = line.style_dashed)
+                        s.lb := label.new(x2, s.entry, s.planText("armed"), style = label.style_label_left,
+                             color = color.new(s.isLong ? cSetT : cSetS, 15), textcolor = color.black, size = size.normal)
+                        ev := "armed"
+                    else
+                        s.state := 0
+    else if s.state == 2 or s.state == 3
+        x2 = bar_index + 15
+        s.lE.set_x2(x2)
+        s.lS.set_x2(x2)
+        s.lT.set_x2(x2)
+        s.lb.set_x(x2)
+        stopHit = s.isLong ? low <= s.stop : high >= s.stop
+        tgtHit  = s.isLong ? high >= s.target : low <= s.target
+        if s.state == 2
+            touched = s.isLong ? low <= s.entry : high >= s.entry
+            if touched
+                s.state := 3
+                ev := "filled"
+                // Same-bar stop counts against us (bar order unknown - be conservative).
+                if stopHit
+                    s.finish("stopped")
+                    ev := "stopped"
+                else
+                    s.lb.set_text(s.planText("filled"))
+            else if tgtHit
+                s.finish("expired - ran to target without filling")
+                ev := "expired"
+            else if not inWin
+                s.finish("expired - no fill in window")
+                ev := "expired"
+        else if stopHit
+            s.finish("stopped")
+            ev := "stopped"
+        else if tgtHit
+            s.finish("target hit")
+            ev := "target"
+    ev
+
+var Setup longSetup  = Setup.new(true)
+var Setup shortSetup = Setup.new(false)
+rawBullFVG = low > high[2] and (low - high[2]) >= fvgMin * atr
+rawBearFVG = high < low[2] and (low[2] - high) >= fvgMin * atr
+string evL = ""
+string evS = ""
+if showSetups and isIntra
+    evL := longSetup.step(sslSwept, low, structUp, rawBullFVG, low, high[2], inNYAM)
+    evS := shortSetup.step(bslSwept, high, structDn, rawBearFVG, low[2], high, inNYAM)
+
+// ─────────────────────────────────────────────── Session display
+// A small panel showing the current killzone + market phase, New York and
+// Singapore clocks, and a countdown to the end of this killzone or the start
+// of the next one. Plus a name tag at the start of each killzone band.
+// Countdown ignores weekends and holidays (it only knows clock times).
+g7 = "Session display"
+showPanel = input.bool(true, "Session panel", group = g7)
+panelPos  = input.string("top right", "Panel position", options = ["top right", "top center", "bottom right", "bottom left"], group = g7)
+showTags  = input.bool(true, "Name tag at the start of each killzone", group = g7)
+showSGT   = input.bool(true, "Show Singapore time", group = g7)
+
+sessMin(string s, int from) =>
+    int(str.tonumber(str.substring(s, from, from + 2))) * 60 + int(str.tonumber(str.substring(s, from + 2, from + 4)))
+minsUntil(int target, int nowM) => (target - nowM + 1440) % 1440
+fmtDur(int m) => m >= 60 ? str.tostring(math.floor(m / 60)) + "h " + str.tostring(m % 60) + "m" : str.tostring(m) + "m"
+
+tagKZ(bool use, bool inNow, string name, color col) =>
+    if showTags and isIntra and use and inNow and not inNow[1]
+        label.new(bar_index, high, name, yloc = yloc.abovebar, style = label.style_label_down,
+             color = color.new(col, 20), textcolor = color.white, size = size.small)
+
+tagKZ(useAsia, inAsia, "Asia", #78909C)
+tagKZ(useLon, inLon, "London open", #5C6BC0)
+tagKZ(useNYAM, inNYAM, "NY open", #26A69A)
+tagKZ(useLC, inLC, "London close", #AB47BC)
+tagKZ(useNYPM, inNYPM, "NY PM", #FFA726)
+
+var table panel = table.new(panelPos == "top center" ? position.top_center : panelPos == "bottom right" ? position.bottom_right :
+     panelPos == "bottom left" ? position.bottom_left : position.top_right, 2, 5,
+     bgcolor = color.new(#131722, 10), border_color = color.new(#363A45, 0), border_width = 1)
+
+if showPanel and barstate.islast
+    nowM = hour(timenow, TZ) * 60 + minute(timenow, TZ)
+    names = array.from("Asia", "London open", "NY open", "London close", "NY PM")
+    sess  = array.from(sAsia, sLon, sNYAM, sLC, sNYPM)
+    uses  = array.from(useAsia, useLon, useNYAM, useLC, useNYPM)
+    cols  = array.from(#78909C, #5C6BC0, #26A69A, #AB47BC, #FFA726)
+    string cur = "None"
+    color curCol = color.gray
+    string countdown = ""
+    int nextIn = 99999
+    string nextName = ""
+    for i = 0 to 4
+        if uses.get(i)
+            st = sessMin(sess.get(i), 0)
+            en = sessMin(sess.get(i), 5)
+            untilEnd = minsUntil(en, nowM)
+            dur = minsUntil(en, st)
+            inside = dur > 0 and minsUntil(nowM, st) < dur
+            if inside and cur == "None"
+                cur := names.get(i)
+                curCol := cols.get(i)
+                countdown := "ends in " + fmtDur(untilEnd)
+            else if not inside
+                u = minsUntil(st, nowM)
+                if u < nextIn
+                    nextIn := u
+                    nextName := names.get(i)
+    phase = nowM >= 240 and nowM < 570 ? "Pre-market" : nowM >= 570 and nowM < 960 ? "Regular session" :
+         nowM >= 960 and nowM < 1200 ? "After-hours" : "US market closed"
+    nyClock = str.format_time(timenow, "HH:mm", TZ)
+    sgClock = str.format_time(timenow, "HH:mm", "Asia/Singapore")
+    table.cell(panel, 0, 0, "Killzone", text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, 0, cur, text_color = color.white, bgcolor = color.new(curCol, 35), text_size = size.small)
+    table.cell(panel, 0, 1, "Market", text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, 1, phase, text_color = color.white, text_size = size.small)
+    table.cell(panel, 0, 2, cur == "None" ? "Next" : "Timer", text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, 2, cur == "None" ? (nextName == "" ? "-" : nextName + " in " + fmtDur(nextIn)) : countdown,
+         text_color = color.white, text_size = size.small)
+    table.cell(panel, 0, 3, "New York", text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, 3, nyClock, text_color = color.white, text_size = size.small)
+    if showSGT
+        table.cell(panel, 0, 4, "Singapore", text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+        table.cell(panel, 1, 4, sgClock, text_color = color.white, text_size = size.small)
+
+// ─────────────────────────────────────────────── Alerts
+alertcondition(bslSwept, "BSL swept", "ICT: buy-side liquidity swept and rejected")
+alertcondition(sslSwept, "SSL swept", "ICT: sell-side liquidity swept and rejected")
+alertcondition(structUp, "Bullish BOS / CHoCH", "ICT: bullish structure break")
+alertcondition(structDn, "Bearish BOS / CHoCH", "ICT: bearish structure break")
+alertcondition(newBullFVG or newBearFVG, "New FVG", "ICT: new fair value gap")
+alertcondition(evL == "armed", "Long setup armed", "ICT: long setup armed - check the chart for entry, stop, target")
+alertcondition(evS == "armed", "Short setup armed", "ICT: short setup armed - check the chart for entry, stop, target")
+alertcondition(evL == "filled" or evS == "filled", "Setup filled", "ICT: setup entry touched")
+alertcondition(evL == "target" or evS == "target", "Setup target hit", "ICT: setup reached its target")
+alertcondition(evL == "stopped" or evS == "stopped", "Setup stopped", "ICT: setup hit its stop")
