@@ -2,6 +2,7 @@
 //        GET /api/get-snapshot-history?action=grade&ticker=SPY
 //        GET /api/get-snapshot-history?action=weekly-summary&ticker=SPY
 //        GET /api/get-snapshot-history?action=implied-move-summary&ticker=SPY
+//        GET /api/get-snapshot-history?action=tickers  (no ticker needed)
 //
 // Three actions in one file rather than three separate Vercel functions -
 // Hobby plan caps deployments at 12 serverless functions (same reason
@@ -359,6 +360,18 @@ async function handleWeeklySummary(req, res, ticker) {
   });
 }
 
+// ---- tickers (every ticker with data in D1, for the frontend dropdown) ----
+// The ticker filter used to be built only from this browser's
+// localStorage, so on another device it came up empty. This lists every
+// ticker that has a GEX snapshot or a Coffee and Tea session in D1.
+async function handleTickers(req, res) {
+  const rows = await runD1Query(
+    'SELECT ticker FROM gex_snapshots UNION SELECT ticker FROM ct_sessions', []
+  );
+  const tickers = [...new Set(rows.map((r) => r.ticker).filter(Boolean))].sort();
+  return res.status(200).json({ tickers });
+}
+
 // ---- implied-move-summary (IV calibration check) ----
 //
 // If the IV fed into the implied move is well calibrated, the expiration
@@ -512,6 +525,13 @@ export default async function handler(req, res) {
   }
 
   const { ticker, action } = req.query;
+  if (action === 'tickers') {
+    try {
+      return await handleTickers(req, res);
+    } catch (err) {
+      return res.status(500).json({ error: 'Server error', detail: String(err) });
+    }
+  }
   if (!ticker) {
     return res.status(400).json({ error: 'Missing "ticker" query param' });
   }

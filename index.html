@@ -645,6 +645,10 @@ const maInfoBox = document.getElementById('maInfoBox');
 const vpInfoBox = document.getElementById('vpInfoBox');
 const vpChartWrap = document.getElementById('vpChartWrap');
 const tickerFilter = document.getElementById('tickerFilter');
+// Tickers that have data in D1 (any device) - merged into the dropdown so
+// it isn't empty on a new browser. Filled once on page load; see
+// loadD1Tickers() near the bottom of this script.
+let d1Tickers = [];
 const weeklyBtn = document.getElementById('weeklyBtn');
 const weeklyBox = document.getElementById('weeklyBox');
 const weeklyAnalysisText = document.getElementById('weeklyAnalysisText');
@@ -1726,7 +1730,7 @@ function renderHistory() {
   historyList.innerHTML = '';
 
   // Populate ticker filter options
-  const tickers = [...new Set(existing.map((i) => i.ticker))].sort();
+  const tickers = [...new Set([...existing.map((i) => i.ticker), ...d1Tickers])].sort();
   const prevSelection = tickerFilter.value;
   tickerFilter.innerHTML = '<option value="">All tickers</option>' +
     tickers.map((t) => `<option value="${t}">${t}</option>`).join('');
@@ -3820,6 +3824,21 @@ gexLogTab.addEventListener('click', showGexLog);
 flowLogTab.addEventListener('click', showFlowLog);
 
 renderHistory();
+// Best-effort: if D1 is unreachable the dropdown just falls back to this
+// browser's local history, same as before.
+async function loadD1Tickers() {
+  try {
+    const res = await fetch('/api/get-snapshot-history?action=tickers');
+    const data = await res.json();
+    if (res.ok && Array.isArray(data.tickers)) {
+      d1Tickers = data.tickers;
+      renderHistory();
+    }
+  } catch (e) {
+    console.warn('Could not load tickers from D1:', e);
+  }
+}
+loadD1Tickers();
 renderFlowHistory();
 </script>
 </body>
