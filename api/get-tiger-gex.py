@@ -537,6 +537,109 @@ def fetch_tiger_bars(quote_client, symbol, period, limit):
     return bars
 
 
+
+# ---- Opening-gap-through-wall check ----
+# "Concentrated" wall threshold in $M of |net GEX|, per ticker. SPY walls
+# routinely run into the hundreds of millions, so only $1B+ counts there.
+# The default for other tickers is a placeholder - adjust once you run
+# this on names with smaller option markets.
+GAP_WALL_THRESHOLD_M = {"SPY": 1000.0}
+GAP_WALL_THRESHOLD_DEFAULT_M = 250.0
+
+
+def fetch_prev_close_and_today_open(quote_client, symbol, today_et):
+    """Yesterday's close and TODAY's real opening print, from Tiger daily
+    bars (limit=3 for a little slack). Separate from fetch_tiger_bars on
+    purpose - that helper only extracts close/volume and is shared with
+    Chart Analysis, so it's left untouched.
+
+    Draws one call from Tiger's kline quota (the same bucket Chart
+    Analysis uses) - the main GEX pull never used that quota before.
+
+    Returns (prev_close, prev_date, today_open) or raises with a clear
+    message naming the actual columns if Tiger's shape isn't as expected.
+    today_open is None when today's bar doesn't exist yet (pre-open).
+    """
+    df = quote_client.get_bars([symbol], period="day", limit=3)
+    if df is None or len(df) == 0:
+        raise RuntimeError(f"Tiger returned no daily bars for {symbol}")
+    cols = {str(c).lower(): c for c in df.columns}
+    time_col = cols.get("time") or cols.get("timestamp")
+    open_col, close_col = cols.get("open"), cols.get("close")
+    if not (time_col and open_col and close_col):
+        raise RuntimeError(f"Unexpected columns in Tiger daily bars: {list(df.columns)} - need time/open/close")
+
+    rows = []
+    for _, r in df.iterrows():
+        try:
+            t = int(r[time_col]); o = float(r[open_col]); c = float(r[close_col])
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(o) or math.isnan(c):
+            continue
+        # Tiger's daily-bar timestamp convention (ET vs UTC midnight) isn't
+        # confirmed, so accept either reading of the date as "today".
+        d_utc = datetime.fromtimestamp(t / 1000, tz=timezone.utc).date()
+        d_et = datetime.fromtimestamp(t / 1000, tz=EASTERN).date()
+        rows.append({"t": t, "open": o, "close": c, "dates": {d_utc, d_et}, "date": max(d_utc, d_et)})
+    rows.sort(key=lambda x: x["t"])
+    if not rows:
+        raise RuntimeError(f"No usable daily bars for {symbol}")
+
+    if today_et in rows[-1]["dates"]:
+        if len(rows) < 2:
+            raise RuntimeError("Only today's bar returned - no prior close to compare against")
+        prev = rows[-2]
+        return prev["close"], prev["date"].isoformat(), rows[-1]["open"]
+    # Latest bar isn't today's -> market hasn't opened yet today.
+    return rows[-1]["close"], rows[-1]["date"].isoformat(), None
+
+
+def compute_gap_check(quote_client, symbol, levels, today_et):
+    """Did today's 9:30 opening print jump across a concentrated GEX wall
+    versus yesterday's close? That's the case the Coffee and Tea spec's
+    management rule describes ("a gap through a level suggests hedging was
+    overwhelmed rather than respected") - this makes it a computed fact
+    instead of something the model has to notice on its own.
+
+    Uses TODAY's computed walls (current open interest). Never raises -
+    any failure returns status "unavailable" so the GEX pull still works.
+    """
+    threshold = GAP_WALL_THRESHOLD_M.get(symbol, GAP_WALL_THRESHOLD_DEFAULT_M)
+    base = {"threshold_m": threshold, "method": "prior_close_vs_today_open"}
+    try:
+        prev_close, prev_date, today_open = fetch_prev_close_and_today_open(quote_client, symbol, today_et)
+    except Exception as e:
+        return {**base, "status": "unavailable", "detail": f"Could not get open/close: {e}"}
+
+    if today_open is None:
+        return {**base, "status": "not_yet_open", "prev_close": round(prev_close, 2), "prev_close_date": prev_date,
+                "detail": "Today's opening print isn't available yet - rerun after 9:30 ET."}
+
+    lo, hi = sorted((prev_close, today_open))
+    gapped = sorted(
+        ({"strike": l["strike"], "net_gex_millions": l["net_gex_millions"]}
+         for l in levels
+         if abs(l["net_gex_millions"]) >= threshold and lo < l["strike"] < hi),
+        key=lambda w: -abs(w["net_gex_millions"]),
+    )
+    direction = "up" if today_open > prev_close else "down" if today_open < prev_close else "flat"
+    gap_pct = round((today_open - prev_close) / prev_close * 100, 2) if prev_close else None
+    result = {**base, "prev_close": round(prev_close, 2), "prev_close_date": prev_date,
+              "today_open": round(today_open, 2), "gap_pct": gap_pct, "direction": direction,
+              "walls_gapped": gapped}
+    if gapped:
+        names = ", ".join(f"{w['strike']:g} ({'-' if w['net_gex_millions'] < 0 else ''}${abs(w['net_gex_millions']):,.0f}M)" for w in gapped)
+        result["status"] = "gap_through_wall"
+        result["detail"] = (f"Opened {direction} {abs(gap_pct):.2f}% ({prev_close:.2f} -> {today_open:.2f}), "
+                            f"gapping through {names}. Treat the pin thesis at that level as broken pending confirmation.")
+    else:
+        result["status"] = "no_wall_gapped"
+        result["detail"] = (f"Opened {direction} {abs(gap_pct):.2f}% ({prev_close:.2f} -> {today_open:.2f}); "
+                            f"no ${threshold:,.0f}M+ wall between yesterday's close and today's open.")
+    return result
+
+
 def sma(closes, period):
     if len(closes) < period:
         return None
@@ -1655,6 +1758,7 @@ class handler(BaseHTTPRequestHandler):
                 },
                 "diagnostics": diagnostics,
                 "data_quality": data_quality,
+                "gap_check": compute_gap_check(quote_client, symbol, levels, today),
             }
             if expiries_empty:
                 response_body["expirations_skipped_empty"] = expiries_empty

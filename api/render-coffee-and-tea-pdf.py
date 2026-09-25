@@ -252,6 +252,25 @@ class SizingRegime(BaseModel):
     reason: str
 
 
+class GapWall(BaseModel):
+    strike: float
+    net_gex_millions: float
+
+
+class GapCheck(BaseModel):
+    # Server-computed in get-tiger-gex.py (compute_gap_check) and echoed
+    # verbatim by coffee-and-tea.js. Loose Literal-free status on purpose:
+    # a new status value should render, not break PDF validation.
+    status: str
+    detail: Optional[str] = None
+    threshold_m: Optional[float] = None
+    prev_close: Optional[float] = None
+    today_open: Optional[float] = None
+    gap_pct: Optional[float] = None
+    direction: Optional[str] = None
+    walls_gapped: list[GapWall] = Field(default_factory=list)
+
+
 class ReasoningOutput(BaseModel):
     market_structure: MarketStructure
     macro_context: MacroContext
@@ -266,6 +285,9 @@ class ReasoningOutput(BaseModel):
     # Server-computed in coffee-and-tea.js (regimeRiskBudget). Optional so
     # sessions stored before regime sizing existed still render.
     sizing_regime: Optional[SizingRegime] = None
+    # Opening-gap-through-wall check. Optional so screenshot sessions and
+    # sessions stored before this existed still render.
+    gap_check: Optional[GapCheck] = None
 
     @model_validator(mode="after")
     def at_least_one_strategy(self):
@@ -616,8 +638,13 @@ def _prior_staleness_days(ctx):
         return None
 
 
-def build_market_structure(S, ms, spot):
+def build_market_structure(S, ms, spot, gap_check=None):
     S.append(_h(1, "Market Structure Read"))
+    if gap_check and gap_check.detail:
+        if gap_check.status == "gap_through_wall":
+            S.append(Paragraph(f"<font color='#B35A00'><b>Opening gap through wall:</b> {gap_check.detail}</font>", BODY))
+        else:
+            S.append(Paragraph(f"Opening gap check: {gap_check.detail}", NOTE))
     S.append(Paragraph(ms.summary, BODY))
     if ms.key_levels:
         rows = [[_p("Level", CELLH), _p("Type", CELLH), _p("GEX Size", CELLH), _p("Read", CELLH)]]
@@ -878,7 +905,7 @@ def generate_pdf(output: ReasoningOutput, session_date: str, expiration: str,
     S = []
     build_header(S, session_date, expiration, portfolio_size, spot)
     build_data_quality(S, output, input_context, data_quality)
-    build_market_structure(S, output.market_structure, spot)
+    build_market_structure(S, output.market_structure, spot, output.gap_check)
     build_day_over_day(S, output.day_over_day_comparison, input_context)
     build_flow_context(S, output.eod_flow_context)
     build_macro_context(S, output.macro_context, input_context, session_date, expiration)

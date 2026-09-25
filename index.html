@@ -3019,6 +3019,10 @@ function buildGexDataFromCurrent(data) {
     // tier never fired through the UI even on Tiger-sourced sessions -
     // every session silently used the user_assumed IV instead.
     gamma_inputs: data.gamma_inputs ?? undefined,
+    // Opening-gap-through-wall check (Tiger pulls only). Forwarded so
+    // Coffee and Tea can both feed it to the model and echo it back for
+    // the visible line in Market Structure and the PDF.
+    gap_check: data.gap_check ?? undefined,
   };
 }
 
@@ -3296,7 +3300,12 @@ function ctSection(title, contentHtml) {
 function renderCtOutput(o) {
   let html = '';
 
+  const gc = o.gap_check;
+  const gapLine = !gc ? '' : gc.status === 'gap_through_wall'
+    ? `<p style="margin:0 0 8px; color:#f0a030;"><strong>Opening gap through wall:</strong> ${gc.detail}</p>`
+    : `<p style="margin:0 0 8px; color:#999; font-size:12.5px;">Opening gap check: ${gc.detail || gc.status}</p>`;
   html += ctSection('Market Structure', `
+    ${gapLine}
     <p>${o.market_structure.summary}</p>
     <table style="border-collapse:collapse; font-size:12.5px; margin-top:6px;">
       <tr><th style="padding:3px 8px; color:#999; text-align:left;">Strike</th><th style="padding:3px 8px; color:#999; text-align:left;">Type</th><th style="padding:3px 8px; color:#999; text-align:right;">GEX ($M)</th><th style="padding:3px 8px; color:#999; text-align:left;">Significance</th></tr>

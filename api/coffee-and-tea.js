@@ -275,6 +275,16 @@ in market_structure.summary or strategy_tilt; in "calm", you may state
 the read is in the regime where it has historically been most reliable.
 Never imply walls will contain price in any regime.
 
+15. OPENING GAP CHECK (server-computed, Tiger pulls only): if
+gex_data.gap_check.status is "gap_through_wall", today's 9:30 open jumped
+across one or more concentrated walls (listed in walls_gapped) versus
+yesterday's close. Apply the gap management rule below to those strikes:
+name them in trade_thesis.base_case, treat any pin thesis anchored at a
+gapped strike as broken pending confirmation, and do not build range or
+credit structures that depend on a gapped wall holding. If status is
+"no_wall_gapped", "not_yet_open" or "unavailable", or gap_check is absent,
+do not mention it.
+
 MANAGEMENT RULES:
 - GEX walls are "pay attention" lines, not hard floors/ceilings - they
   describe dealer hedging mechanics, not certainty.
@@ -685,6 +695,12 @@ export default async function handler(req, res) {
     // implied weekly move, computed the same way (see lib/options-
     // pricing.js) - deterministic, added after the model responds, same
     // pattern as everything else in this block.
+    // Echo the server-computed gap check into the output verbatim, so the
+    // visible line on the page and in the PDF shows the computed fact,
+    // not the model's paraphrase of it. null when absent (screenshot
+    // uploads, or older frontends that don't forward it).
+    parsed.gap_check = input.gex_data.gap_check ?? null;
+
     if (parsed.volatility_check) {
       parsed.volatility_check.iv_used_pct = ivUsedPct;
       parsed.volatility_check.iv_source = ivSource;
