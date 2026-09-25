@@ -474,7 +474,14 @@ function regimeRiskBudget(rv20) {
   };
 }
 
+// Single source of truth for the model/effort actually requested - used
+// both in the API call and in the per-session _meta log below, so the
+// two can never silently disagree.
+const REASONING_MODEL = 'claude-opus-5-5';
+const REASONING_EFFORT = 'medium';
+
 export default async function handler(req, res) {
+  const handlerStartedAt = Date.now();
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Use POST' });
   }
@@ -541,6 +548,7 @@ export default async function handler(req, res) {
       options_expiration_context: optionsExpirationContext,
     };
 
+    const modelCallStartedAt = Date.now();
     const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -549,14 +557,14 @@ export default async function handler(req, res) {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-opus-5-5', // TEMPORARY TRIAL - was 'claude-sonnet-4-6'. Revert after testing.
+        model: REASONING_MODEL, // TEMPORARY TRIAL - was 'claude-sonnet-4-6'. Revert after testing.
         max_tokens: 32000,
         // TEMPORARY TRIAL: default effort is "high" - real usage on the
         // first two runs showed ~2,700-3,000 thinking tokens/session.
         // Testing "medium" to see if it meaningfully cuts thinking-token
         // cost while output quality holds up for this bounded, spec-
         // driven task. Remove this whole output_config block on revert.
-        output_config: { effort: 'medium' },
+        output_config: { effort: REASONING_EFFORT },
         system: systemPrompt,
         messages: [
           { role: 'user', content: JSON.stringify(modelInput, null, 2) },
@@ -570,6 +578,7 @@ export default async function handler(req, res) {
     }
 
     const result = await anthropicRes.json();
+    const modelCallMs = Date.now() - modelCallStartedAt;
     const textBlock = result.content.find((b) => b.type === 'text');
     if (!textBlock) {
       return res.status(502).json({ error: 'No text content in model response' });
@@ -695,6 +704,30 @@ export default async function handler(req, res) {
     } catch (validationErr) {
       return res.status(502).json({ error: `Response failed validation: ${validationErr.message}`, raw: parsed });
     }
+
+    // Per-session metadata, stored inside output_json (no D1 schema
+    // change - queryable via json_extract(output_json, '$._meta.model_used')).
+    // Lets graded backtests be segmented by what produced each session
+    // (model, effort, real vs fallback IV), and builds a daily IV history
+    // for the planned spot-up/vol-up regime detector. Added after
+    // validation, never shown to the model; the PDF renderer ignores it.
+    parsed._meta = {
+      logged_at: new Date().toISOString(),
+      model_requested: REASONING_MODEL,
+      model_used: result.model ?? null,
+      effort: REASONING_EFFORT,
+      stop_reason: result.stop_reason ?? null,
+      usage: result.usage ?? null,
+      iv_used_pct: ivUsedPct,
+      iv_source: ivSource,
+      // "option_analysis_30d" (real Tiger reading) vs "hard_fallback"
+      // (Tiger's IV call failed, flat 15% used) - both appear as
+      // iv_source "tiger_underlying_iv", so this is the only way to tell.
+      iv_sub_source: input.gex_data.gamma_inputs?.underlying_iv_source ?? null,
+      spot,
+      model_call_ms: modelCallMs,
+      total_ms_before_save: Date.now() - handlerStartedAt,
+    };
 
     // Persist for later backtesting/grading - never blocks the response.
     const ticker = input.ticker || 'SPY';
