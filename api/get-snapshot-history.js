@@ -1,6 +1,7 @@
 // Route: GET /api/get-snapshot-history?action=history&ticker=SPY&days=35  (default action)
 //        GET /api/get-snapshot-history?action=grade&ticker=SPY
 //        GET /api/get-snapshot-history?action=weekly-summary&ticker=SPY
+//        GET /api/get-snapshot-history?action=implied-move-summary&ticker=SPY
 //
 // Three actions in one file rather than three separate Vercel functions -
 // Hobby plan caps deployments at 12 serverless functions (same reason
@@ -25,6 +26,12 @@
 //   rate, win rate by strategy name, and predicted-POP-vs-actual-win-rate
 //   calibration (the number that actually says whether the GEX thesis's
 //   confidence levels are trustworthy).
+// implied-move-summary: read-only calibration check of the 1-sigma
+//   implied move each Coffee and Tea session stores in
+//   volatility_check.implied_move. For every resolved session, checks
+//   whether the expiration close landed inside the range, and how big the
+//   actual move was in units of the implied 1-sigma. Computed on demand
+//   from ct_sessions + Yahoo closes - writes nothing, no new table.
 
 // Formats any Date/timestamp as YYYY-MM-DD in US Eastern time. Used both
 // for "today" (called with no argument) and for labeling historical
@@ -352,6 +359,128 @@ async function handleWeeklySummary(req, res, ticker) {
   });
 }
 
+// ---- implied-move-summary (IV calibration check) ----
+//
+// If the IV fed into the implied move is well calibrated, the expiration
+// close should land inside the 1-sigma range ~68.3% of the time, and the
+// average |actual move| / one-sigma should be ~0.80 (E|Z| for a standard
+// normal = sqrt(2/pi)). Ratio persistently above 0.80 -> IV has been too
+// low (real moves bigger than priced); below -> IV too high.
+//
+// Caveat baked into the response: sessions in the same week share the
+// same expiration, so observations overlap and aren't independent - the
+// effective sample size is smaller than the raw session count.
+const EXPECTED_HIT_RATE_PCT = 68.3;
+const EXPECTED_ABS_Z = 0.8;
+
+async function handleImpliedMoveSummary(req, res, ticker) {
+  const today = todayEasternDateStr();
+  const sessions = await runD1Query(
+    'SELECT session_date, expiration, output_json FROM ct_sessions WHERE ticker = ? AND expiration < ? ORDER BY session_date ASC',
+    [ticker, today]
+  );
+
+  const candidates = [];
+  let withoutImpliedMove = 0;
+  for (const row of sessions) {
+    let output;
+    try { output = JSON.parse(row.output_json); } catch (e) { continue; }
+    const im = output.volatility_check?.implied_move;
+    const low = im?.expected_range_usd?.low;
+    const high = im?.expected_range_usd?.high;
+    if (typeof low !== 'number' || typeof high !== 'number' || high <= low) {
+      withoutImpliedMove++;
+      continue;
+    }
+    candidates.push({
+      session_date: row.session_date,
+      expiration: row.expiration,
+      low,
+      high,
+      spot: (low + high) / 2, // range is symmetric around the spot it was computed from
+      one_sigma: (high - low) / 2,
+      iv_used_pct: output.volatility_check?.iv_used_pct ?? null,
+      iv_source: output.volatility_check?.iv_source ?? 'unknown',
+    });
+  }
+
+  if (candidates.length === 0) {
+    return res.status(200).json({
+      ticker,
+      sessions_checked: sessions.length,
+      sessions_scored: 0,
+      message: 'No resolved sessions with a stored implied move yet - only sessions run after the implied-move feature shipped carry one, and they need their expiration to pass.',
+    });
+  }
+
+  // One Yahoo fetch covering every window, rather than one per session.
+  const from = candidates[0].session_date;
+  const through = candidates.reduce((m, c) => (c.expiration > m ? c.expiration : m), candidates[0].expiration);
+  const closes = await fetchDailyCloses(ticker, from, through);
+  if (closes.length === 0) {
+    return res.status(502).json({ error: 'No price data returned for the scoring window', from, through });
+  }
+
+  const scored = [];
+  const unscored = [];
+  for (const c of candidates) {
+    // Close ON expiration, or the last close before it (holiday/early-close case).
+    const onOrBefore = closes.filter((d) => d.date <= c.expiration && d.date >= c.session_date);
+    const final = onOrBefore[onOrBefore.length - 1];
+    if (!final) { unscored.push({ session_date: c.session_date, reason: 'no close in window' }); continue; }
+    const z = (final.close - c.spot) / c.one_sigma;
+    scored.push({
+      ...c,
+      close_date: final.date,
+      close: +final.close.toFixed(2),
+      inside: final.close >= c.low && final.close <= c.high,
+      z: +z.toFixed(2),
+    });
+  }
+
+  const summarize = (rows) => {
+    if (rows.length === 0) return null;
+    const hits = rows.filter((r) => r.inside).length;
+    const absZ = rows.reduce((s, r) => s + Math.abs(r.z), 0) / rows.length;
+    return {
+      n: rows.length,
+      hit_rate_pct: +((hits / rows.length) * 100).toFixed(1),
+      avg_abs_z: +absZ.toFixed(2),
+      closes_above_range: rows.filter((r) => r.close > r.high).length,
+      closes_below_range: rows.filter((r) => r.close < r.low).length,
+    };
+  };
+
+  const bySource = {};
+  for (const r of scored) (bySource[r.iv_source] ||= []).push(r);
+  const bySourceSummary = Object.fromEntries(Object.entries(bySource).map(([k, v]) => [k, summarize(v)]));
+
+  const overall = summarize(scored);
+  let verdict = 'insufficient data';
+  if (overall && overall.n >= 20) {
+    if (overall.avg_abs_z > EXPECTED_ABS_Z * 1.15) verdict = 'IV looks too LOW - realized moves are larger than the implied range priced';
+    else if (overall.avg_abs_z < EXPECTED_ABS_Z * 0.85) verdict = 'IV looks too HIGH - realized moves are smaller than the implied range priced';
+    else verdict = 'IV looks roughly calibrated';
+  }
+
+  return res.status(200).json({
+    ticker,
+    sessions_checked: sessions.length,
+    sessions_without_implied_move: withoutImpliedMove,
+    sessions_scored: scored.length,
+    expected: { hit_rate_pct: EXPECTED_HIT_RATE_PCT, avg_abs_z: EXPECTED_ABS_Z },
+    overall,
+    by_iv_source: bySourceSummary,
+    verdict,
+    caveat: 'Sessions in the same week share an expiration, so observations overlap and are not independent. Treat fewer than ~20 scored sessions as directional only.',
+    sessions: scored.map((r) => ({
+      session_date: r.session_date, expiration: r.expiration, iv_source: r.iv_source,
+      range: [r.low, r.high], close_date: r.close_date, close: r.close, inside: r.inside, z: r.z,
+    })),
+    unscored,
+  });
+}
+
 // ---- delete (removes a wrongly-uploaded/wrongly-analysed snapshot) ----
 
 async function handleDelete(req, res, ticker, sessionDate) {
@@ -393,7 +522,8 @@ export default async function handler(req, res) {
     if (resolvedAction === 'history') return await handleHistory(req, res, tickerUpper);
     if (resolvedAction === 'grade') return await handleGrade(req, res, tickerUpper);
     if (resolvedAction === 'weekly-summary') return await handleWeeklySummary(req, res, tickerUpper);
-    return res.status(400).json({ error: 'action must be "history", "grade", or "weekly-summary"' });
+    if (resolvedAction === 'implied-move-summary') return await handleImpliedMoveSummary(req, res, tickerUpper);
+    return res.status(400).json({ error: 'action must be "history", "grade", "weekly-summary", or "implied-move-summary"' });
   } catch (err) {
     return res.status(500).json({ error: 'Server error', detail: String(err) });
   }
