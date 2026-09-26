@@ -104,6 +104,26 @@ class ImpliedMove(BaseModel):
     method: str
 
 
+class VixTermStructure(BaseModel):
+    status: str
+    vix9d: Optional[float] = None
+    vix: Optional[float] = None
+    vix3m: Optional[float] = None
+    vix_vix3m_ratio: Optional[float] = None
+    vix9d_vix_ratio: Optional[float] = None
+    curve_shape: Optional[str] = None
+    near_term_stress: Optional[bool] = None
+
+
+class VolContext(BaseModel):
+    # Server data from get-tiger-gex.py, echoed verbatim. All optional so
+    # partial fetches and older sessions render.
+    iv_30d_pct: Optional[float] = None
+    iv_rank_52w_pct: Optional[float] = None
+    iv_percentile_52w_pct: Optional[float] = None
+    vix_term_structure: Optional[VixTermStructure] = None
+
+
 class VolatilityCheck(BaseModel):
     realized_vol_10d_pct: float
     realized_vol_20d_pct: float
@@ -116,6 +136,8 @@ class VolatilityCheck(BaseModel):
     # never becomes a hard requirement that could break re-rendering an
     # older stored session.
     implied_move: Optional[ImpliedMove] = None
+    vol_context: Optional[VolContext] = None
+    vol_regime_note: Optional[str] = None
 
 
 class WallCrossReference(BaseModel):
@@ -197,6 +219,19 @@ class LiquidityCheck(BaseModel):
     detail: Optional[str] = None
 
 
+class ShortLegSigma(BaseModel):
+    type: str
+    strike: float
+    sigma_from_spot: float
+    inside_1sigma: bool
+
+
+class ExpectedMoveCheck(BaseModel):
+    status: str  # loose on purpose: a new status should render, not fail validation
+    short_legs: list[ShortLegSigma] = Field(default_factory=list)
+    detail: Optional[str] = None
+
+
 class Strategy(BaseModel):
     name: str
     view: str
@@ -212,6 +247,7 @@ class Strategy(BaseModel):
     entry_level: Optional[float] = None
     invalidation_level: Optional[float] = None
     liquidity_check: LiquidityCheck
+    expected_move_check: Optional[ExpectedMoveCheck] = None
 
     @model_validator(mode="after")
     def defined_risk_only(self):
@@ -764,6 +800,22 @@ def build_vol_check(S, vc, ctx):
         S.append(Paragraph(
             f"Implied 1&sigma; range to expiry: ${im.expected_range_usd['low']:.2f}&ndash;"
             f"${im.expected_range_usd['high']:.2f} (&plusmn;{im.one_sigma_move_pct:g}%)", BODY))
+    vcx = vc.vol_context
+    if vcx:
+        parts = []
+        if vcx.iv_rank_52w_pct is not None:
+            parts.append(f"IV rank (52w) {vcx.iv_rank_52w_pct:g}")
+        if vcx.iv_percentile_52w_pct is not None:
+            parts.append(f"IV percentile {vcx.iv_percentile_52w_pct:g}")
+        ts = vcx.vix_term_structure
+        if ts and ts.vix is not None:
+            f2 = lambda v: f"{v:.2f}" if v is not None else "&ndash;"
+            shape = f" ({ts.curve_shape}{', near-term stress' if ts.near_term_stress else ''})" if ts.curve_shape else ""
+            parts.append(f"VIX9D / VIX / VIX3M {f2(ts.vix9d)} / {f2(ts.vix)} / {f2(ts.vix3m)}{shape}")
+        if parts:
+            S.append(Paragraph(" &nbsp;&middot;&nbsp; ".join(parts), BODY))
+    if vc.vol_regime_note:
+        S.append(Paragraph(f"<i>{vc.vol_regime_note}</i>", BODY))
     S.append(Paragraph(f"<b>Verdict: {vc.verdict.upper()}.</b> {vc.strategy_tilt}", BODY))
     S.append(Spacer(1, 4))
 
@@ -813,6 +865,16 @@ def build_strategies(S, strategies, portfolio_size):
         ])
     S.append(_table(rows, [0.25*inch, 0.85*inch, 1.2*inch, 1.3*inch, 0.65*inch,
                            0.35*inch, 0.6*inch, 0.6*inch, 0.5*inch, 0.4*inch], font_size=8))
+    em_notes = []
+    for i, s in enumerate(ranked, 1):
+        em = s.expected_move_check
+        if not em or em.status in ("no_short_legs", "unavailable"):
+            continue
+        sig = ", ".join(f"{l.strike:g}{l.type} {l.sigma_from_spot:+g}&sigma;" for l in em.short_legs)
+        flag = "<font color='#c06000'><b>inside 1&sigma;</b></font>" if em.status == "inside_1sigma" else {"outside_1sigma": "outside 1&sigma;", "debit_structure": "debit (not flagged)"}.get(em.status, em.status.replace("_", " "))
+        em_notes.append(f"#{i}: {flag} &mdash; short strikes {sig}")
+    if em_notes:
+        S.append(Paragraph("<b>Expected-move check:</b> " + " &nbsp;|&nbsp; ".join(em_notes), NOTE))
     if any(s.pricing.pricing_source != "live_chain" for s in ranked):
         at_spot = [s for s in ranked if s.pricing.priced_at not in (None, "entry_trigger")]
         if any(s.pricing.priced_at == "entry_trigger" for s in ranked):

@@ -422,6 +422,68 @@ def bs_gamma(spot, strike, t_years, sigma, risk_free_rate, dividend_yield):
     return math.exp(-dividend_yield * t_years) * pdf_d1 / (spot * sigma * sqrt_t)
 
 
+def _normalize_pct_0_100(value):
+    """Tiger doesn't document whether iv_metric.rank/percentile come back
+    on a 0-1 or 0-100 scale. Values <= 1.0 are treated as fractions and
+    scaled up; anything larger is taken as already-a-percentage. The one
+    ambiguous case (a genuine 0-100 reading of exactly 0-1) is rare and
+    only understates rank by a rounding error, so this is acceptable
+    until the scale is confirmed against a live response - the raw value
+    is always returned alongside so it can be checked."""
+    if value is None:
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(v) or v < 0:
+        return None
+    return round(v * 100, 1) if v <= 1.0 else round(v, 1)
+
+
+def get_underlying_vol_analysis(quote_client, symbol):
+    """One get_option_analysis call, returning everything it offers that
+    this app uses: the live 30-day IV (the flat gamma-calc input - see
+    get_underlying_iv below for why) plus 52-week IV rank/percentile and
+    Tiger's own historical vol. No extra quota cost - this call was
+    already being made for the IV alone.
+
+    Never raises. On failure, iv falls back to HARD_FALLBACK_IV and the
+    rank fields are None (never guessed).
+    """
+    out = {
+        "iv": HARD_FALLBACK_IV,
+        "iv_source": "hard_fallback",
+        "iv_rank_52w_pct": None,
+        "iv_percentile_52w_pct": None,
+        "iv_rank_raw": None,
+        "iv_percentile_raw": None,
+        "hv_tiger": None,
+        "iv_hv_ratio_tiger": None,
+    }
+    try:
+        results = quote_client.get_option_analysis(symbols=[symbol], market=Market.US)
+        for item in results:
+            if getattr(item, "symbol", None) != symbol:
+                continue
+            iv = getattr(item, "implied_vol_30_days", None)
+            if iv is not None and not math.isnan(iv) and iv > 0:
+                out["iv"] = iv
+                out["iv_source"] = "option_analysis_30d"
+            metric = getattr(item, "iv_metric", None)
+            if metric is not None:
+                out["iv_rank_raw"] = getattr(metric, "rank", None)
+                out["iv_percentile_raw"] = getattr(metric, "percentile", None)
+                out["iv_rank_52w_pct"] = _normalize_pct_0_100(out["iv_rank_raw"])
+                out["iv_percentile_52w_pct"] = _normalize_pct_0_100(out["iv_percentile_raw"])
+            out["hv_tiger"] = getattr(item, "his_volatility", None)
+            out["iv_hv_ratio_tiger"] = getattr(item, "iv_his_v_ratio", None)
+            break
+    except Exception:
+        pass
+    return out
+
+
 def get_underlying_iv(quote_client, symbol):
     """Tiger's per-contract implied_vol field is coming back as 0.0 for
     every row on the chain endpoint (confirmed in testing - not documented
@@ -433,17 +495,80 @@ def get_underlying_iv(quote_client, symbol):
     input at all. Falls back to HARD_FALLBACK_IV only if this call itself
     fails (e.g. transient error/rate limit) - not expected in normal use.
     Returns (iv_value, source_string) so callers can report which path was used.
+    Thin wrapper over get_underlying_vol_analysis, kept for existing callers.
     """
-    try:
-        results = quote_client.get_option_analysis(symbols=[symbol], market=Market.US)
-        for item in results:
-            if getattr(item, "symbol", None) == symbol:
-                iv = getattr(item, "implied_vol_30_days", None)
-                if iv is not None and not math.isnan(iv) and iv > 0:
-                    return iv, "option_analysis_30d"
-    except Exception:
-        pass
-    return HARD_FALLBACK_IV, "hard_fallback"
+    a = get_underlying_vol_analysis(quote_client, symbol)
+    return a["iv"], a["iv_source"]
+
+
+# ---- VIX term structure (Yahoo, same unofficial chart endpoint already
+# used for spot above). Ratios, not levels, are what matter here:
+#   VIX / VIX3M  > 1.0  -> backwardation: near-term fear priced above
+#                          longer-term, historically a stress regime
+#   VIX9D / VIX  > 1.0  -> the next ~2 weeks priced above 30 days,
+#                          usually a scheduled event (CPI/FOMC) or acute stress
+# Thresholds are fixed, pre-stated numbers (not tuned), same stance as the
+# RV-based sizing threshold in coffee-and-tea.js.
+VIX_BACKWARDATION_RATIO = 1.0
+VIX_FLAT_BAND_LOW = 0.95
+
+
+def _yahoo_last_price(ticker):
+    import urllib.request
+    import urllib.parse
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker)}?range=1d&interval=1d"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=4) as response:
+        data = json.loads(response.read())
+    result = data["chart"]["result"][0]
+    price = result.get("meta", {}).get("regularMarketPrice")
+    if price is None:
+        closes = [c for c in result["indicators"]["quote"][0]["close"] if c is not None]
+        price = closes[-1] if closes else None
+    return float(price) if price is not None else None
+
+
+def fetch_vix_term_structure():
+    """Best-effort, never raises. status is "ok", "partial" (some tenors
+    missing - ratios computed only where both sides exist) or
+    "unavailable"."""
+    from concurrent.futures import ThreadPoolExecutor
+    tenors = {"vix9d": "^VIX9D", "vix": "^VIX", "vix3m": "^VIX3M"}
+
+    def safe(ticker):
+        try:
+            return _yahoo_last_price(ticker)
+        except Exception:
+            return None
+
+    # Parallel so the worst case adds one timeout (~4s), not three.
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {key: pool.submit(safe, t) for key, t in tenors.items()}
+        levels = {key: f.result() for key, f in futures.items()}
+
+    vix, vix9d, vix3m = levels["vix"], levels["vix9d"], levels["vix3m"]
+    if vix is None:
+        return {"status": "unavailable", "source": "yahoo", **levels,
+                "detail": "VIX quote unavailable - term structure skipped."}
+
+    out = {"status": "ok" if (vix9d and vix3m) else "partial", "source": "yahoo",
+           "vix9d": vix9d, "vix": vix, "vix3m": vix3m,
+           "vix_vix3m_ratio": None, "vix9d_vix_ratio": None,
+           "curve_shape": None, "near_term_stress": None}
+
+    if vix3m:
+        r = vix / vix3m
+        out["vix_vix3m_ratio"] = round(r, 3)
+        out["curve_shape"] = (
+            "backwardation" if r > VIX_BACKWARDATION_RATIO
+            else "flat" if r >= VIX_FLAT_BAND_LOW
+            else "contango"
+        )
+    if vix9d:
+        r9 = vix9d / vix
+        out["vix9d_vix_ratio"] = round(r9, 3)
+        out["near_term_stress"] = r9 > VIX_BACKWARDATION_RATIO
+    return out
 
 
 def nearest_weekly_friday(today_date):
@@ -1405,7 +1530,8 @@ class handler(BaseHTTPRequestHandler):
             strike_low = spot * (1 - strike_band_pct)
             strike_high = spot * (1 + strike_band_pct)
             quote_client = get_quote_client()
-            underlying_iv, underlying_iv_source = get_underlying_iv(quote_client, symbol)
+            vol_analysis = get_underlying_vol_analysis(quote_client, symbol)
+            underlying_iv, underlying_iv_source = vol_analysis["iv"], vol_analysis["iv_source"]
 
             now_et = datetime.now(timezone.utc).astimezone(EASTERN)
             today = now_et.date()
@@ -1759,6 +1885,22 @@ class handler(BaseHTTPRequestHandler):
                 "diagnostics": diagnostics,
                 "data_quality": data_quality,
                 "gap_check": compute_gap_check(quote_client, symbol, levels, today),
+                # Vol regime context for Coffee and Tea (IV rank from the
+                # same get_option_analysis call above; VIX curve from
+                # Yahoo). Stored in D1 with the snapshot, so a daily
+                # history builds up for the planned Layer 3 test. Context
+                # only - does NOT change sizing (see coffee-and-tea.js).
+                "vol_context": {
+                    "iv_30d_pct": round(underlying_iv * 100, 2),
+                    "iv_source": underlying_iv_source,
+                    "iv_rank_52w_pct": vol_analysis["iv_rank_52w_pct"],
+                    "iv_percentile_52w_pct": vol_analysis["iv_percentile_52w_pct"],
+                    "iv_rank_raw": vol_analysis["iv_rank_raw"],
+                    "iv_percentile_raw": vol_analysis["iv_percentile_raw"],
+                    "hv_tiger": vol_analysis["hv_tiger"],
+                    "iv_hv_ratio_tiger": vol_analysis["iv_hv_ratio_tiger"],
+                    "vix_term_structure": fetch_vix_term_structure(),
+                },
             }
             if expiries_empty:
                 response_body["expirations_skipped_empty"] = expiries_empty

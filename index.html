@@ -3190,7 +3190,24 @@ function buildGexDataFromCurrent(data) {
     // Coffee and Tea can both feed it to the model and echo it back for
     // the visible line in Market Structure and the PDF.
     gap_check: data.gap_check ?? undefined,
+    // IV rank + VIX term structure (Tiger pulls only) - context for the
+    // model's vol read; echoed back verbatim for display.
+    vol_context: data.vol_context ?? undefined,
   };
+}
+
+// One line summarizing vol_context, shared by the page view.
+function ctVolContextLine(vcx) {
+  if (!vcx) return '';
+  const ts = vcx.vix_term_structure || {};
+  const parts = [];
+  if (vcx.iv_rank_52w_pct != null) parts.push(`IV rank (52w): ${vcx.iv_rank_52w_pct}`);
+  if (vcx.iv_percentile_52w_pct != null) parts.push(`IV pctile: ${vcx.iv_percentile_52w_pct}`);
+  if (ts.vix != null) {
+    const curve = [ts.vix9d, ts.vix, ts.vix3m].map((v) => (v != null ? v.toFixed(2) : '–')).join(' / ');
+    parts.push(`VIX9D / VIX / VIX3M: ${curve}${ts.curve_shape ? ` (${ts.curve_shape}${ts.near_term_stress ? ', near-term stress' : ''})` : ''}`);
+  }
+  return parts.length ? `<p>${parts.join(' · ')}</p>` : '';
 }
 
 // Pulls the most recent SAVED snapshot for the same ticker from gex_history
@@ -3501,6 +3518,8 @@ function renderCtOutput(o) {
   html += ctSection('Volatility Check', `
     <p>10d RV: ${vc.realized_vol_10d_pct}% · 20d RV: ${vc.realized_vol_20d_pct}% · IV used: ${vc.iv_used_pct}% (${vc.iv_source})</p>
     ${vc.implied_move ? `<p>Implied weekly move (1σ): $${vc.implied_move.expected_range_usd.low.toFixed(2)}–$${vc.implied_move.expected_range_usd.high.toFixed(2)} (±${vc.implied_move.one_sigma_move_pct}%)</p>` : ''}
+    ${ctVolContextLine(vc.vol_context)}
+    ${vc.vol_regime_note ? `<p style="color:#bbb;"><em>${vc.vol_regime_note}</em></p>` : ''}
     <p><strong style="color:${vc.verdict === 'rich' ? '#e66767' : vc.verdict === 'cheap' ? '#199e70' : '#eda100'};">${vc.verdict.toUpperCase()}</strong> — ${vc.strategy_tilt}</p>
   `);
 
@@ -3524,6 +3543,12 @@ function renderCtOutput(o) {
   const stratRows = o.strategies.map((s) => {
     const legsStr = s.legs.map((l) => `${l.action} ${l.type} $${l.strike} (${l.expiry})`).join('; ');
     const liqColor = { green: '#199e70', yellow: '#eda100', red: '#e66767', awaiting_live_chain: '#666' }[s.liquidity_check.status] || '#666';
+    const em = s.expected_move_check;
+    const emColor = em?.status === 'inside_1sigma' ? '#f0a030' : em?.status === 'outside_1sigma' ? '#199e70' : '#666';
+    const emSigmas = em?.short_legs?.length ? ' (' + em.short_legs.map((l) => `${l.strike}${l.type} ${l.sigma_from_spot > 0 ? '+' : ''}${l.sigma_from_spot}σ`).join(', ') + ')' : '';
+    const emLine = em && em.status !== 'no_short_legs'
+      ? `<p style="margin-top:4px; font-size:12px; color:${emColor};">Expected move: ${em.status === 'inside_1sigma' ? '⚠ ' : ''}${em.detail || em.status}${emSigmas}</p>`
+      : '';
     return `<div style="margin-top:12px; padding:10px; background:#1a1a1a; border-radius:6px;">
       <strong>${s.name}</strong> <span style="color:#999;">— ${s.view}</span>
       <p style="margin-top:4px; font-size:12.5px; color:#ccc;">${legsStr}</p>
@@ -3532,6 +3557,7 @@ function renderCtOutput(o) {
       <p style="margin-top:4px; font-size:12.5px; color:#199e70;">50% profit target: $${s.profit_target_50pct.trigger_price_usd} (${s.profit_target_50pct.est_path})</p>
       <p style="margin-top:4px; font-size:12.5px; color:#e66767;">Stop-loss: ${s.stop_loss.price_trigger_usd != null ? '$' + s.stop_loss.price_trigger_usd : 'monitor manually'} · structural: ${s.stop_loss.structural_trigger}</p>
       <p style="margin-top:4px; font-size:12.5px;">POP: ${s.pop_pct != null ? s.pop_pct + '%' : 'n/a'} · Entry: ${s.entry_trigger}</p>
+      ${emLine}
       <p style="margin-top:4px; font-size:12px; color:${liqColor};">Liquidity: ${s.liquidity_check.status}${s.liquidity_check.detail ? ' — ' + s.liquidity_check.detail : ''}</p>
     </div>`;
   }).join('');

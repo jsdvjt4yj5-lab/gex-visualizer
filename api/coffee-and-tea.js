@@ -236,6 +236,31 @@ notably above realized - favors credit/premium-selling structures),
 verticals), or "fair" (roughly in line). State strategy_tilt explaining
 which structures this favors and why.
 
+10a. EXPECTED MOVE (server-computed, before you pick strikes): the
+input's implied_move gives the 1-sigma expected range to expiration
+(expected_range_usd low/high) from the same IV and time-to-expiry used
+to price every strategy. For credit structures, place short strikes
+OUTSIDE this range by default - a short strike inside it is roughly a
+coin flip to be tested before expiry. If you deliberately place one
+inside (e.g. a wall you expect to hold), say why in that strategy's
+entry_trigger. Debit structures are not constrained by this. This range
+assumes a flat IV with no skew, so downside moves are likely understated
+- give short puts a little extra room. A per-strategy check is computed
+after you respond; do not compute your own.
+
+10b. VOL REGIME CONTEXT (when gex_data.vol_context is present): use
+iv_rank_52w_pct (where today's IV sits in its 52-week range, 0-100) and
+vix_term_structure (curve_shape: contango/flat/backwardation;
+near_term_stress: true when VIX9D is above VIX) to sharpen
+volatility_check.strategy_tilt and write volatility_check.vol_regime_note.
+Low IV rank weakens the case for premium selling even when IV looks rich
+vs realized; high IV rank strengthens it. Backwardation or
+near_term_stress means near-term fear is elevated - treat range/credit
+structures more cautiously and say so. Any field may be null - if so,
+say it is unavailable rather than guessing. This is context only: it
+does not change sizing (sizing_regime is already fixed server-side).
+If vol_context is absent, set vol_regime_note to "Vol regime data unavailable."
+
 11. EOD FLOW CONTEXT (when flow_data is provided): summarize the session's
 skew and aggression tone (session_summary). Cross-reference each major GEX
 wall against flow_data.top_conviction_trades and note in
@@ -299,6 +324,7 @@ response with any naked/uncovered leg will be rejected downstream.`;
 
 const OUTPUT_SCHEMA_NOTE = `Keep every text field short - hard limits, not suggestions:
 - "summary", "why_it_matters", "session_summary", "base_case", "profit_target_est_path", "strategy_tilt": 25 words max each
+- "vol_regime_note": 20 words max
 - "significance", "detail", "guidance", "stop_loss_structural_trigger", "entry_trigger", "condition", "delta_note", "tension_or_alignment_note", "reason": 15 words max each
 - "structure": 8 words max
 These are real limits because this output has many nested sections and exactly
@@ -311,7 +337,7 @@ prose, no markdown fences, no commentary outside the JSON:
 {
   "market_structure": { "summary": string, "key_levels": [{"strike": number, "type": "wall"|"flip_zone"|"support"|"resistance"|"confluence", "gex_usd_m": number|null, "significance": string}] },
   "macro_context": { "key_catalyst": string, "why_it_matters": string, "per_strategy_guidance": [{"strategy_type": string, "guidance": string}] },
-  "volatility_check": { "realized_vol_10d_pct": number, "realized_vol_20d_pct": number, "iv_used_pct": number, "iv_source": "tiger_underlying_iv"|"user_assumed"|"placeholder"|"live_chain", "verdict": "rich"|"cheap"|"fair", "strategy_tilt": string },
+  "volatility_check": { "realized_vol_10d_pct": number, "realized_vol_20d_pct": number, "iv_used_pct": number, "iv_source": "tiger_underlying_iv"|"user_assumed"|"placeholder"|"live_chain", "verdict": "rich"|"cheap"|"fair", "strategy_tilt": string, "vol_regime_note": string },
   "eod_flow_context": { "session_summary": string, "wall_cross_references": [{"strike": number, "gex_confirms": boolean, "detail": string}], "standout_prints": [{"strike": number, "detail": string}], "tension_or_alignment_note": string } | null,
   "trade_thesis": { "base_case": string, "base_case_levels": [number], "upside_break": {"condition": string, "target_levels": [number]}, "downside_break": {"condition": string, "target_levels": [number]} },
   "strategies": [{
@@ -441,6 +467,45 @@ function extractLastJSONObject(text) {
 }
 
 const round2 = (x) => Math.round(x * 100) / 100;
+
+// Deterministic per-strategy expected-move check: where each short strike
+// sits relative to the 1-sigma implied range, in sigma units from spot.
+// Flags credit structures with a short strike inside the range. Computed
+// after the model responds, never trusted from the model.
+function computeExpectedMoveCheck(strategy, impliedMove, spot, creditOrDebit) {
+  const oneSigma = impliedMove?.one_sigma_move_usd;
+  if (!(oneSigma > 0)) {
+    return { status: 'unavailable', short_legs: [], detail: 'Implied move not available.' };
+  }
+  const { low, high } = impliedMove.expected_range_usd;
+  const shortLegs = (strategy.legs || [])
+    .filter((l) => l.action === 'sell')
+    .map((l) => ({
+      type: l.type,
+      strike: l.strike,
+      sigma_from_spot: round2((l.strike - spot) / oneSigma),
+      inside_1sigma: l.strike > low && l.strike < high,
+    }));
+  if (!shortLegs.length) {
+    return { status: 'no_short_legs', short_legs: [], detail: null };
+  }
+  if (creditOrDebit !== 'credit') {
+    return { status: 'debit_structure', short_legs: shortLegs, detail: 'Debit structure - short legs cap profit, not flagged.' };
+  }
+  const inside = shortLegs.filter((l) => l.inside_1sigma);
+  if (inside.length) {
+    return {
+      status: 'inside_1sigma',
+      short_legs: shortLegs,
+      detail: `Short ${inside.map((l) => `${l.strike}${l.type}`).join(', ')} inside 1σ range $${low}-$${high}.`,
+    };
+  }
+  return {
+    status: 'outside_1sigma',
+    short_legs: shortLegs,
+    detail: `All short strikes outside 1σ range $${low}-$${high}.`,
+  };
+}
 const ASSUMED_FALLBACK_IV_PCT = 13;
 // Regime-dependent risk budget (Sugar findings: the GEX signal is most
 // reliable in calm regimes, least in high-vol ones - Maurer 2026). Computed
@@ -550,8 +615,18 @@ export default async function handler(req, res) {
       expiration: opexContextForDate(input.expiration, inputTicker),
     };
     const sizingRegime = regimeRiskBudget(input.realized_vol_20d_pct);
+    // Computed BEFORE the model call (previously only after) so strike
+    // selection can see the expected range - see spec step 10a.
+    const impliedMove = computeImpliedMove({
+      spot,
+      ivUsedPct,
+      sessionDate: input.session_date,
+      expiration: input.expiration,
+    });
+    const volContext = input.gex_data.vol_context ?? null;
     const modelInput = {
       ...input,
+      implied_move: impliedMove,
       sizing_regime: sizingRegime,
       iv_used_pct: ivUsedPct,
       iv_source: ivSource,
@@ -682,6 +757,7 @@ export default async function handler(req, res) {
           entry_level: typeof s.entry_level === 'number' ? s.entry_level : null,
           invalidation_level: typeof s.invalidation_level === 'number' ? s.invalidation_level : null,
           liquidity_check: s.liquidity_check,
+          expected_move_check: computeExpectedMoveCheck(s, impliedMove, spot, econ.pricing.credit_or_debit),
         };
       });
     } catch (pricingErr) {
@@ -704,12 +780,13 @@ export default async function handler(req, res) {
     if (parsed.volatility_check) {
       parsed.volatility_check.iv_used_pct = ivUsedPct;
       parsed.volatility_check.iv_source = ivSource;
-      parsed.volatility_check.implied_move = computeImpliedMove({
-        spot,
-        ivUsedPct,
-        sessionDate: input.session_date,
-        expiration: input.expiration,
-      });
+      parsed.volatility_check.implied_move = impliedMove;
+      // Echo the raw server data verbatim so the page/PDF show the
+      // numbers themselves, not the model's paraphrase.
+      parsed.volatility_check.vol_context = volContext;
+      if (typeof parsed.volatility_check.vol_regime_note !== 'string') {
+        parsed.volatility_check.vol_regime_note = volContext ? '' : 'Vol regime data unavailable.';
+      }
     }
 
     // Server-determined, like iv_used_pct above - never taken from the model.
@@ -741,6 +818,12 @@ export default async function handler(req, res) {
       // iv_source "tiger_underlying_iv", so this is the only way to tell.
       iv_sub_source: input.gex_data.gamma_inputs?.underlying_iv_source ?? null,
       spot,
+      // Logged for the planned Layer 3 test (does GEX add anything beyond
+      // vol regime?) - flat, so json_extract can query them directly.
+      iv_rank_52w_pct: volContext?.iv_rank_52w_pct ?? null,
+      vix: volContext?.vix_term_structure?.vix ?? null,
+      vix_vix3m_ratio: volContext?.vix_term_structure?.vix_vix3m_ratio ?? null,
+      vix9d_vix_ratio: volContext?.vix_term_structure?.vix9d_vix_ratio ?? null,
       model_call_ms: modelCallMs,
       total_ms_before_save: Date.now() - handlerStartedAt,
     };
