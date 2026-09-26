@@ -307,6 +307,30 @@ class GapCheck(BaseModel):
     walls_gapped: list[GapWall] = Field(default_factory=list)
 
 
+class WeeklyRange(BaseModel):
+    low: float
+    high: float
+
+
+class WeeklyExpectedMove(BaseModel):
+    # Server-computed in get-tiger-gex.py (compute_weekly_expected_move),
+    # echoed verbatim. Everything optional except status so an
+    # "unavailable" result still validates.
+    status: str
+    detail: Optional[str] = None
+    anchor_close: Optional[float] = None
+    anchor_date: Optional[str] = None
+    week_end_expiry: Optional[str] = None
+    iv_used_pct: Optional[float] = None
+    iv_basis: Optional[str] = None
+    one_sigma_move_pct: Optional[float] = None
+    range_1sigma: Optional[WeeklyRange] = None
+    range_2sigma: Optional[WeeklyRange] = None
+    spot: Optional[float] = None
+    spot_sigma_from_anchor: Optional[float] = None
+    spot_position: Optional[str] = None
+
+
 class ReasoningOutput(BaseModel):
     market_structure: MarketStructure
     macro_context: MacroContext
@@ -324,6 +348,7 @@ class ReasoningOutput(BaseModel):
     # Opening-gap-through-wall check. Optional so screenshot sessions and
     # sessions stored before this existed still render.
     gap_check: Optional[GapCheck] = None
+    weekly_expected_move: Optional[WeeklyExpectedMove] = None
 
     @model_validator(mode="after")
     def at_least_one_strategy(self):
@@ -785,7 +810,25 @@ def build_macro_context(S, mc, ctx, session_date, expiration):
     S.append(Spacer(1, 4))
 
 
-def build_vol_check(S, vc, ctx):
+def build_weekly_em(S, w):
+    if not w:
+        return
+    if w.status != "ok" or not w.range_1sigma:
+        S.append(Paragraph(f"<b>Weekly expected move:</b> {w.detail or 'unavailable'}", NOTE))
+        return
+    r, r2 = w.range_1sigma, w.range_2sigma
+    drift = (" <font color='#777777'>(prior-week IV not stored &mdash; today's IV used, so this range "
+             "can shift between sessions)</font>") if (w.iv_basis or "").startswith("today") else ""
+    S.append(Paragraph(
+        f"<b>Weekly expected move to {w.week_end_expiry}: ${r.low:.2f}&ndash;${r.high:.2f}</b> "
+        f"(&plusmn;{w.one_sigma_move_pct:g}%, 1&sigma; from the {w.anchor_date} close of ${w.anchor_close:.2f}, "
+        f"IV {w.iv_used_pct:g}%)" + (f"; 2&sigma; ${r2.low:.2f}&ndash;${r2.high:.2f}" if r2 else "") + drift, BODY))
+    if w.spot_sigma_from_anchor is not None:
+        pos = "inside the range" if w.spot_position == "inside" else f"<font color='#c06000'><b>{w.spot_position} the 1&sigma; range</b></font>"
+        S.append(Paragraph(f"Spot ${w.spot:.2f} is {w.spot_sigma_from_anchor:+g}&sigma; from the anchor &mdash; {pos}.", BODY))
+
+
+def build_vol_check(S, vc, ctx, weekly=None):
     S.append(_h(5, "Realized vs. Implied Vol"))
     rv_missing = ctx is not None and ctx.get("realized_vol_20d_pct") is None
     if rv_missing:
@@ -816,6 +859,7 @@ def build_vol_check(S, vc, ctx):
             S.append(Paragraph(" &nbsp;&middot;&nbsp; ".join(parts), BODY))
     if vc.vol_regime_note:
         S.append(Paragraph(f"<i>{vc.vol_regime_note}</i>", BODY))
+    build_weekly_em(S, weekly)
     S.append(Paragraph(f"<b>Verdict: {vc.verdict.upper()}.</b> {vc.strategy_tilt}", BODY))
     S.append(Spacer(1, 4))
 
@@ -971,7 +1015,7 @@ def generate_pdf(output: ReasoningOutput, session_date: str, expiration: str,
     build_day_over_day(S, output.day_over_day_comparison, input_context)
     build_flow_context(S, output.eod_flow_context)
     build_macro_context(S, output.macro_context, input_context, session_date, expiration)
-    build_vol_check(S, output.volatility_check, input_context)
+    build_vol_check(S, output.volatility_check, input_context, output.weekly_expected_move)
     build_thesis(S, output.trade_thesis)
     build_strategies(S, output.strategies, portfolio_size)
     build_exits(S, output.strategies)

@@ -9,7 +9,8 @@
 //   CT|<session date YYYY-MM-DD>|<ticker>           header
 //   <code>|<price>|<label>|<line width>|<label offset in bars>
 // Codes: WP positive wall, WN negative wall, F gamma flip, A POC/VA, M moving
-// average, TH thesis range/target, IM implied range, E strategy entry,
+// average, TH thesis range/target, IM implied range, WK weekly expected
+// move (anchored, fixed all week), E strategy entry,
 // X invalidation, T 50% target (SPY equivalent), S price stop (SPY
 // equivalent), BE breakeven.
 //
@@ -38,6 +39,7 @@ gE = input.bool(true, "Strategy entry + invalidation", group = gs)
 gX = input.bool(true, "Strategy 50% target + price stop", group = gs)
 gT = input.bool(true, "Thesis range + targets", group = gs)
 gI = input.bool(false, "Implied 1-sigma range", group = gs)
+gWk = input.bool(true, "Weekly expected move (also shown in Focus)", group = gs)
 gB = input.bool(false, "Strategy breakevens", group = gs)
 showLabels = input.bool(true, "Labels", group = gs)
 labelSize  = input.string("small", "Label size", options = ["small", "normal", "large"], group = gs)
@@ -57,6 +59,7 @@ cVolP   = input.color(color.rgb(206, 147, 216), "POC / VA", group = gc)
 cMa     = input.color(color.rgb(176, 190, 197), "MAs / breakevens", group = gc)
 cThesis = input.color(color.rgb(100, 181, 246), "Thesis range / targets", group = gc)
 cImpl   = input.color(color.rgb(158, 158, 158), "Implied range", group = gc)
+cWeekly = input.color(color.rgb(255, 213, 79), "Weekly expected move", group = gc)
 cEntry  = input.color(color.rgb(105, 240, 174), "Strategy entry", group = gc)
 cInval  = input.color(color.rgb(240, 98, 146), "Strategy invalidation", group = gc)
 cTarget = input.color(color.rgb(0, 229, 255), "50% target", group = gc)
@@ -73,6 +76,7 @@ codeColor(string c) =>
         "M"  => cMa
         "TH" => cThesis
         "IM" => cImpl
+        "WK" => cWeekly
         "E"  => cEntry
         "X"  => cInval
         "T"  => cTarget
@@ -93,6 +97,7 @@ codeOn(string c) =>
         "S"  => gX
         "TH" => gT
         "IM" => gI
+        "WK" => gWk
         "BE" => gB
         => true
 
@@ -174,7 +179,7 @@ visible(int i) =>
     c = codes.get(i)
     bool ok = true
     if focus
-        ok := c == "F" or (isWall(c) and wallRank(i) < wallsEach) or c == "E" or c == "X" or c == "T" or c == "S"
+        ok := c == "F" or (isWall(c) and wallRank(i) < wallsEach) or c == "E" or c == "X" or c == "T" or c == "S" or (c == "WK" and gWk)
     else
         ok := codeOn(c)
     if ok and isPlanLine(c)

@@ -663,6 +663,86 @@ def fetch_tiger_bars(quote_client, symbol, period, limit):
 
 
 
+# ---- Weekly expected move (anchored) ----
+# The standard "weekly expected move": set ONCE from the prior week's
+# closing price and that week's IV, measured to this week's last listed
+# expiration, and held fixed all week - so each session shows where spot
+# sits inside the SAME range rather than a range that follows price.
+# (The rolling, to-session-expiry range still lives in Coffee and Tea's
+# volatility_check.implied_move.)
+
+def compute_weekly_expected_move(symbol, spot, week_expiries, daily_rows, current_iv, current_iv_source):
+    """week_expiries: listed expirations (ISO strings) in the target week,
+    from the chain's own expiration list - so a holiday Friday resolves to
+    Thursday automatically. Never raises; returns status "unavailable"
+    with a reason on any failure."""
+    try:
+        if not week_expiries:
+            return {"status": "unavailable", "detail": "No listed expirations found for the target week."}
+        end_expiry = max(week_expiries)
+        week_monday = date.fromisoformat(end_expiry) - timedelta(days=date.fromisoformat(end_expiry).weekday())
+        if not daily_rows:
+            return {"status": "unavailable", "detail": "Daily bars unavailable - no anchor close."}
+        prior = [r for r in daily_rows if r["date"] < week_monday]
+        if not prior:
+            return {"status": "unavailable", "detail": "No daily close found before this week - anchor unknown."}
+        anchor = prior[-1]
+        anchor_close = anchor["close"]
+        anchor_date = anchor["date"]
+
+        # Anchor IV: the last stored Tiger snapshot from before this week
+        # (taken ~1hr after that day's open, not at the close - close
+        # enough for a weekly range). Falls back to today's IV, flagged.
+        iv, iv_basis = None, None
+        snap = fetch_prior_snapshot_from_d1(symbol, week_monday.isoformat())
+        if snap:
+            gi = snap.get("gamma_inputs") or {}
+            snap_iv = gi.get("underlying_iv_used_as_fallback")
+            snap_date = (snap.get("captured_at") or "")[:10]
+            fresh = False
+            try:
+                fresh = (week_monday - date.fromisoformat(snap_date)).days <= 7
+            except ValueError:
+                pass
+            if (isinstance(snap_iv, (int, float)) and snap_iv > 0 and fresh
+                    and gi.get("underlying_iv_source") == "option_analysis_30d"):
+                iv, iv_basis = float(snap_iv), f"snapshot_{snap_date}"
+        if iv is None:
+            iv, iv_basis = current_iv, f"today_{current_iv_source}"
+
+        # Calendar time, anchor close (4pm ET) -> end expiry close (4pm ET),
+        # same 365-day convention as every other T in this file.
+        t_years = max((date.fromisoformat(end_expiry) - anchor_date).days, 1) / 365.0
+        one_sigma = anchor_close * iv * math.sqrt(t_years)
+        low, high = anchor_close - one_sigma, anchor_close + one_sigma
+        pos_sigma = (spot - anchor_close) / one_sigma if one_sigma > 0 else None
+        if pos_sigma is None:
+            position = None
+        elif abs(pos_sigma) < 1:
+            position = "inside"
+        else:
+            position = "above" if pos_sigma > 0 else "below"
+
+        return {
+            "status": "ok",
+            "anchor_close": round(anchor_close, 2),
+            "anchor_date": anchor_date.isoformat(),
+            "week_end_expiry": end_expiry,
+            "iv_used_pct": round(iv * 100, 2),
+            "iv_basis": iv_basis,  # "snapshot_<date>" (proper anchor) or "today_..." (fallback, range will drift)
+            "one_sigma_move_usd": round(one_sigma, 2),
+            "one_sigma_move_pct": round(one_sigma / anchor_close * 100, 2),
+            "range_1sigma": {"low": round(low, 2), "high": round(high, 2)},
+            "range_2sigma": {"low": round(anchor_close - 2 * one_sigma, 2), "high": round(anchor_close + 2 * one_sigma, 2)},
+            "spot": round(spot, 2),
+            "spot_sigma_from_anchor": round(pos_sigma, 2) if pos_sigma is not None else None,
+            "spot_position": position,  # inside / above / below the 1-sigma range
+            "method": "anchored_prior_week_close_iv_formula",
+        }
+    except Exception as e:
+        return {"status": "unavailable", "detail": f"Weekly expected move failed: {e}"}
+
+
 # ---- Opening-gap-through-wall check ----
 # "Concentrated" wall threshold in $M of |net GEX|, per ticker. SPY walls
 # routinely run into the hundreds of millions, so only $1B+ counts there.
@@ -672,7 +752,40 @@ GAP_WALL_THRESHOLD_M = {"SPY": 1000.0}
 GAP_WALL_THRESHOLD_DEFAULT_M = 250.0
 
 
-def fetch_prev_close_and_today_open(quote_client, symbol, today_et):
+def fetch_daily_ohlc_rows(quote_client, symbol, limit=8):
+    """Daily bars as [{t, open, close, dates, date}], oldest first. One
+    kline-quota call - fetched once per GEX pull and shared by the gap
+    check and the weekly expected move (limit=8 covers last week's close
+    plus this week so far). Raises with the actual column names if
+    Tiger's shape isn't as expected."""
+    df = quote_client.get_bars([symbol], period="day", limit=limit)
+    if df is None or len(df) == 0:
+        raise RuntimeError(f"Tiger returned no daily bars for {symbol}")
+    cols = {str(c).lower(): c for c in df.columns}
+    time_col = cols.get("time") or cols.get("timestamp")
+    open_col, close_col = cols.get("open"), cols.get("close")
+    if not (time_col and open_col and close_col):
+        raise RuntimeError(f"Unexpected columns in Tiger daily bars: {list(df.columns)} - need time/open/close")
+    rows = []
+    for _, r in df.iterrows():
+        try:
+            t = int(r[time_col]); o = float(r[open_col]); c = float(r[close_col])
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(o) or math.isnan(c):
+            continue
+        # Tiger's daily-bar timestamp convention (ET vs UTC midnight) isn't
+        # confirmed, so accept either reading of the date.
+        d_utc = datetime.fromtimestamp(t / 1000, tz=timezone.utc).date()
+        d_et = datetime.fromtimestamp(t / 1000, tz=EASTERN).date()
+        rows.append({"t": t, "open": o, "close": c, "dates": {d_utc, d_et}, "date": max(d_utc, d_et)})
+    rows.sort(key=lambda x: x["t"])
+    if not rows:
+        raise RuntimeError(f"No usable daily bars for {symbol}")
+    return rows
+
+
+def fetch_prev_close_and_today_open(quote_client, symbol, today_et, rows=None):
     """Yesterday's close and TODAY's real opening print, from Tiger daily
     bars (limit=3 for a little slack). Separate from fetch_tiger_bars on
     purpose - that helper only extracts close/volume and is shared with
@@ -685,31 +798,8 @@ def fetch_prev_close_and_today_open(quote_client, symbol, today_et):
     message naming the actual columns if Tiger's shape isn't as expected.
     today_open is None when today's bar doesn't exist yet (pre-open).
     """
-    df = quote_client.get_bars([symbol], period="day", limit=3)
-    if df is None or len(df) == 0:
-        raise RuntimeError(f"Tiger returned no daily bars for {symbol}")
-    cols = {str(c).lower(): c for c in df.columns}
-    time_col = cols.get("time") or cols.get("timestamp")
-    open_col, close_col = cols.get("open"), cols.get("close")
-    if not (time_col and open_col and close_col):
-        raise RuntimeError(f"Unexpected columns in Tiger daily bars: {list(df.columns)} - need time/open/close")
-
-    rows = []
-    for _, r in df.iterrows():
-        try:
-            t = int(r[time_col]); o = float(r[open_col]); c = float(r[close_col])
-        except (TypeError, ValueError):
-            continue
-        if math.isnan(o) or math.isnan(c):
-            continue
-        # Tiger's daily-bar timestamp convention (ET vs UTC midnight) isn't
-        # confirmed, so accept either reading of the date as "today".
-        d_utc = datetime.fromtimestamp(t / 1000, tz=timezone.utc).date()
-        d_et = datetime.fromtimestamp(t / 1000, tz=EASTERN).date()
-        rows.append({"t": t, "open": o, "close": c, "dates": {d_utc, d_et}, "date": max(d_utc, d_et)})
-    rows.sort(key=lambda x: x["t"])
-    if not rows:
-        raise RuntimeError(f"No usable daily bars for {symbol}")
+    if rows is None:
+        rows = fetch_daily_ohlc_rows(quote_client, symbol)
 
     if today_et in rows[-1]["dates"]:
         if len(rows) < 2:
@@ -720,7 +810,7 @@ def fetch_prev_close_and_today_open(quote_client, symbol, today_et):
     return rows[-1]["close"], rows[-1]["date"].isoformat(), None
 
 
-def compute_gap_check(quote_client, symbol, levels, today_et):
+def compute_gap_check(quote_client, symbol, levels, today_et, rows=None):
     """Did today's 9:30 opening print jump across a concentrated GEX wall
     versus yesterday's close? That's the case the Coffee and Tea spec's
     management rule describes ("a gap through a level suggests hedging was
@@ -733,7 +823,7 @@ def compute_gap_check(quote_client, symbol, levels, today_et):
     threshold = GAP_WALL_THRESHOLD_M.get(symbol, GAP_WALL_THRESHOLD_DEFAULT_M)
     base = {"threshold_m": threshold, "method": "prior_close_vs_today_open"}
     try:
-        prev_close, prev_date, today_open = fetch_prev_close_and_today_open(quote_client, symbol, today_et)
+        prev_close, prev_date, today_open = fetch_prev_close_and_today_open(quote_client, symbol, today_et, rows)
     except Exception as e:
         return {**base, "status": "unavailable", "detail": f"Could not get open/close: {e}"}
 
@@ -1761,6 +1851,21 @@ class handler(BaseHTTPRequestHandler):
                     spot_price_final = median_strike
                     spot_price_corrected = True
 
+            # One daily-bar fetch shared by the gap check and the weekly
+            # expected move (one kline-quota call, same as before).
+            try:
+                daily_rows = fetch_daily_ohlc_rows(quote_client, symbol)
+            except Exception:
+                daily_rows = None  # both consumers report "unavailable" on their own
+            # Target week = the week of the nearest upcoming expiration (this
+            # week on a weekday; next week if run after Friday's close).
+            first_future = date.fromisoformat(future["date"].tolist()[0])
+            em_monday = first_future - timedelta(days=first_future.weekday())
+            week_expiries_for_em = [
+                d for d in future["date"].tolist()
+                if em_monday.isoformat() <= d <= (em_monday + timedelta(days=6)).isoformat()
+            ]
+
             # ---- DATA QUALITY CHECKS ----
             # Aggregate, human-readable pass/warn checks on top of the raw
             # per-expiry diagnostics above - the goal is that a bad fetch
@@ -1884,7 +1989,11 @@ class handler(BaseHTTPRequestHandler):
                 },
                 "diagnostics": diagnostics,
                 "data_quality": data_quality,
-                "gap_check": compute_gap_check(quote_client, symbol, levels, today),
+                "gap_check": compute_gap_check(quote_client, symbol, levels, today, daily_rows),
+                "weekly_expected_move": compute_weekly_expected_move(
+                    symbol, spot_price_final, week_expiries_for_em, daily_rows,
+                    underlying_iv, underlying_iv_source,
+                ),
                 # Vol regime context for Coffee and Tea (IV rank from the
                 # same get_option_analysis call above; VIX curve from
                 # Yahoo). Stored in D1 with the snapshot, so a daily

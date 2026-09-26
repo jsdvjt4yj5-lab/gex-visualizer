@@ -3193,7 +3193,20 @@ function buildGexDataFromCurrent(data) {
     // IV rank + VIX term structure (Tiger pulls only) - context for the
     // model's vol read; echoed back verbatim for display.
     vol_context: data.vol_context ?? undefined,
+    // Anchored weekly 1-sigma range (Tiger pulls only).
+    weekly_expected_move: data.weekly_expected_move ?? undefined,
   };
+}
+
+function ctWeeklyEmLine(w) {
+  if (!w) return '';
+  if (w.status !== 'ok') return `<p style="color:#999;">Weekly expected move: ${w.detail || 'unavailable'}</p>`;
+  const r = w.range_1sigma;
+  const posColor = w.spot_position === 'inside' ? '#ddd' : '#f0a030';
+  const posText = w.spot_position === 'inside' ? 'inside' : `${w.spot_position} the range`;
+  const drift = String(w.iv_basis || '').startsWith('today') ? ' <span style="color:#999;">(anchor IV missing - used today\'s)</span>' : '';
+  return `<p><strong>Weekly expected move (to ${w.week_end_expiry}):</strong> $${r.low.toFixed(2)}–$${r.high.toFixed(2)} (±${w.one_sigma_move_pct}%, from ${w.anchor_date} close $${w.anchor_close})${drift}<br>
+    <span style="color:${posColor};">Spot $${w.spot} is ${w.spot_sigma_from_anchor > 0 ? '+' : ''}${w.spot_sigma_from_anchor}σ from anchor — ${posText}</span></p>`;
 }
 
 // One line summarizing vol_context, shared by the page view.
@@ -3518,6 +3531,7 @@ function renderCtOutput(o) {
   html += ctSection('Volatility Check', `
     <p>10d RV: ${vc.realized_vol_10d_pct}% · 20d RV: ${vc.realized_vol_20d_pct}% · IV used: ${vc.iv_used_pct}% (${vc.iv_source})</p>
     ${vc.implied_move ? `<p>Implied weekly move (1σ): $${vc.implied_move.expected_range_usd.low.toFixed(2)}–$${vc.implied_move.expected_range_usd.high.toFixed(2)} (±${vc.implied_move.one_sigma_move_pct}%)</p>` : ''}
+    ${ctWeeklyEmLine(o.weekly_expected_move)}
     ${ctVolContextLine(vc.vol_context)}
     ${vc.vol_regime_note ? `<p style="color:#bbb;"><em>${vc.vol_regime_note}</em></p>` : ''}
     <p><strong style="color:${vc.verdict === 'rich' ? '#e66767' : vc.verdict === 'cheap' ? '#199e70' : '#eda100'};">${vc.verdict.toUpperCase()}</strong> — ${vc.strategy_tilt}</p>
@@ -3720,6 +3734,12 @@ function buildPineScript(output, input) {
     add('implied', im.expected_range_usd.low, `Implied 1σ low`, 'color.silver', 1, 'dotted', '1σ low');
     add('implied', im.expected_range_usd.high, `Implied 1σ high`, 'color.silver', 1, 'dotted', '1σ high');
   }
+  // Anchored weekly expected move (fixed all week)
+  const wem = output.weekly_expected_move;
+  if (wem?.status === 'ok') {
+    add('weekly', wem.range_1sigma.low, `Weekly 1σ low (from ${wem.anchor_date})`, 'color.yellow', 2, 'dashed', 'Wk 1σ low');
+    add('weekly', wem.range_1sigma.high, `Weekly 1σ high (from ${wem.anchor_date})`, 'color.yellow', 2, 'dashed', 'Wk 1σ high');
+  }
   // Strategy triggers + breakevens
   (output.strategies || []).forEach((s, i) => {
     const tag = `S${i + 1} ${s.name}`;
@@ -3757,6 +3777,7 @@ function buildPineScript(output, input) {
     'color.gray':   ['cMa',      'color.rgb(176, 190, 197)', 'MAs / breakevens'],
     'color.blue':   ['cThesis',  'color.rgb(100, 181, 246)', 'Thesis range / targets'],
     'color.silver': ['cImplied', 'color.rgb(158, 158, 158)', 'Implied range'],
+    'color.yellow': ['cWeekly',  'color.rgb(255, 213, 79)',  'Weekly expected move'],
     'color.lime':   ['cEntry',   'color.rgb(105, 240, 174)', 'Strategy entry'],
     'color.maroon': ['cInval',   'color.rgb(240, 98, 146)',  'Strategy invalidation'],
     'color.aqua':   ['cTarget',  'color.rgb(0, 229, 255)',   'Strategy 50% target'],
@@ -3789,6 +3810,7 @@ function buildPineScript(output, input) {
     ['exits', 'Strategy 50% target + price stop (SPY equiv.)', true],
     ['thesis', 'Thesis range + targets', true],
     ['implied', 'Implied 1-sigma range', false],
+    ['weekly', 'Weekly expected move', true],
     ['strategies', 'Strategy breakevens', false],
   ].filter(([g]) => drawn.some((d) => d.group === g));
 
@@ -3831,7 +3853,7 @@ function buildPineScript(output, input) {
 // the Pine code never changes per session. Format: see that file's header.
 const CT_LEVEL_CODES = {
   cPos: 'WP', cNeg: 'WN', cFlip: 'F', cVolProf: 'A', cMa: 'M', cThesis: 'TH',
-  cImplied: 'IM', cEntry: 'E', cInval: 'X', cTarget: 'T', cStopPx: 'S',
+  cImplied: 'IM', cWeekly: 'WK', cEntry: 'E', cInval: 'X', cTarget: 'T', cStopPx: 'S',
 };
 
 function buildCtLevelsText(output, input) {

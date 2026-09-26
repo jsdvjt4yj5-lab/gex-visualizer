@@ -248,6 +248,15 @@ assumes a flat IV with no skew, so downside moves are likely understated
 - give short puts a little extra room. A per-strategy check is computed
 after you respond; do not compute your own.
 
+10a-ii. WEEKLY EXPECTED MOVE (server-computed, Tiger pulls only): when
+gex_data.weekly_expected_move.status is "ok", it gives this week's
+anchored 1-sigma range (range_1sigma), fixed from the prior week's close
+(anchor_close), and where spot sits in it (spot_sigma_from_anchor,
+spot_position). Mention it in trade_thesis.base_case when relevant -
+e.g. spot already near or outside the weekly range edge means much of
+the week's expected move is used up. It is context, not a level price
+must respect. If absent or unavailable, do not mention it.
+
 10b. VOL REGIME CONTEXT (when gex_data.vol_context is present): use
 iv_rank_52w_pct (where today's IV sits in its 52-week range, 0-100) and
 vix_term_structure (curve_shape: contango/flat/backwardation;
@@ -776,6 +785,8 @@ export default async function handler(req, res) {
     // not the model's paraphrase of it. null when absent (screenshot
     // uploads, or older frontends that don't forward it).
     parsed.gap_check = input.gex_data.gap_check ?? null;
+    // Same pattern: the anchored weekly range, echoed verbatim.
+    parsed.weekly_expected_move = input.gex_data.weekly_expected_move ?? null;
 
     if (parsed.volatility_check) {
       parsed.volatility_check.iv_used_pct = ivUsedPct;
