@@ -153,6 +153,7 @@
     <button class="sidebar-item" data-target="section-backtest"><span class="dot"></span>Backtest</button>
     <button class="sidebar-item" data-target="section-logs"><span class="dot"></span>Analysis Logs</button>
     <button class="sidebar-item" data-target="section-chartanalysis"><span class="dot"></span>Chart Analysis</button>
+    <button class="sidebar-item" data-target="section-expectedmove"><span class="dot"></span>Expected Move</button>
   </div>
 </div>
 
@@ -403,6 +404,23 @@
   <div id="chartAnalysisMultiTimeframe" style="margin-top:16px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
 </div>
 <button id="chartAnalysisPdfBtn" style="margin-top:12px;">Download PDF</button>
+</div>
+
+<hr style="border:none; border-top:1px solid #222; margin:32px 0 20px;" />
+
+<div id="section-expectedmove" class="toggle-section">
+<h2 style="font-size:15px; color:#aaa;">Expected Move</h2>
+<p style="font-size:13px; color:#999; margin-top:4px;">
+  Quick range check from Tiger IV - no GEX chain pull, no AI call, nothing saved.
+  The weekly range is fixed from last week's close; the rolling ranges start from spot now.
+</p>
+<div class="controls" style="margin-top:0;">
+  <input type="text" id="emTickerInput" value="SPY" style="background:#1a1a1a; color:#eee; border:1px solid #333; border-radius:6px; padding:8px 12px; width:80px;" />
+  <button id="emCheckBtn" type="button">Check range</button>
+  <button id="emCopyTvBtn" type="button" disabled title="Copies the two weekly lines - paste them at the BOTTOM of the C&amp;T Levels box, below what's already there">Copy weekly lines for TradingView</button>
+</div>
+<div class="status" id="emStatus"></div>
+<div id="emOutput" style="display:none; margin-top:12px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
 </div>
 
 </div>
@@ -1404,6 +1422,70 @@ async function downloadChartAnalysisPdf() {
   }
 }
 chartAnalysisPdfBtn.addEventListener('click', downloadChartAnalysisPdf);
+
+// ---------- Standalone expected-move check ----------
+let currentEmCheck = null;
+async function runExpectedMoveCheck() {
+  const ticker = (document.getElementById('emTickerInput').value || 'SPY').trim().toUpperCase();
+  const status = document.getElementById('emStatus');
+  const out = document.getElementById('emOutput');
+  const btn = document.getElementById('emCheckBtn');
+  const copyBtn = document.getElementById('emCopyTvBtn');
+  btn.disabled = true;
+  copyBtn.disabled = true;
+  status.className = 'status';
+  status.textContent = `Checking ${ticker} range...`;
+  try {
+    const res = await fetch(`/api/get-tiger-gex?mode=expected_move&symbol=${encodeURIComponent(ticker)}`);
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.detail || data.error || `Request failed (${res.status})`);
+    currentEmCheck = data;
+    const fmtRange = (m) => `$${m.expected_range_usd.low.toFixed(2)}–$${m.expected_range_usd.high.toFixed(2)} (±${m.one_sigma_move_pct}%)`;
+    const r = data.rolling || {};
+    const vcx = data.vol_context || {};
+    const ivWarn = vcx.iv_source === 'hard_fallback'
+      ? '<p style="color:#f0a030;">Tiger IV call failed - a flat 15% placeholder was used, so these ranges are not market-based.</p>' : '';
+    out.innerHTML = `
+      <p style="margin:0 0 8px;"><strong>${data.ticker}</strong> spot $${data.spot_price}${data.market_hours ? '' : ' <span style="color:#999;">(outside market hours - last price)</span>'}</p>
+      ${ivWarn}
+      ${ctWeeklyEmLine(data.weekly_expected_move)}
+      ${r.to_nearest_expiry ? `<p>Rolling 1σ to nearest expiry (${r.to_nearest_expiry.expiration}): ${fmtRange(r.to_nearest_expiry)}</p>` : ''}
+      ${r.to_week_end ? `<p>Rolling 1σ to week end (${r.to_week_end.expiration}): ${fmtRange(r.to_week_end)}</p>` : ''}
+      ${ctVolContextLine(vcx)}
+      <p style="color:#888; font-size:12.5px;">IV-formula ranges with one flat IV (no skew) - downside moves are likely understated.</p>`;
+    out.style.display = 'block';
+    copyBtn.disabled = data.weekly_expected_move?.status !== 'ok';
+    status.textContent = `Checked at ${new Date(data.checked_at).toLocaleTimeString()}.`;
+  } catch (err) {
+    status.className = 'status error';
+    status.textContent = 'Expected move check failed: ' + err.message;
+    out.style.display = 'none';
+    currentEmCheck = null;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function copyEmLinesToTradingView() {
+  const w = currentEmCheck?.weekly_expected_move;
+  if (w?.status !== 'ok') return;
+  // Same "WK" record format the C&T Levels indicator already reads.
+  const text = [
+    `WK|${w.range_1sigma.low}|Wk 1σ low|3|2`,
+    `WK|${w.range_1sigma.high}|Wk 1σ high|3|2`,
+  ].join('\n');
+  const status = document.getElementById('emStatus');
+  try {
+    await navigator.clipboard.writeText(text);
+    status.className = 'status';
+    status.textContent = 'Copied 2 lines. In TradingView: C&T Levels -> gear -> Levels box -> paste at the bottom (keep what is there) -> OK.';
+  } catch (e) {
+    status.className = 'status error';
+    status.textContent = 'Clipboard blocked - copy manually:\n' + text;
+  }
+}
+document.getElementById('emCheckBtn').addEventListener('click', runExpectedMoveCheck);
+document.getElementById('emCopyTvBtn').addEventListener('click', copyEmLinesToTradingView);
 
 async function processGexData(data) {
   currentData = data;

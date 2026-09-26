@@ -743,6 +743,71 @@ def compute_weekly_expected_move(symbol, spot, week_expiries, daily_rows, curren
         return {"status": "unavailable", "detail": f"Weekly expected move failed: {e}"}
 
 
+def week_expiries_for_expected_move(future_dates):
+    """Listed expirations in the week of the nearest upcoming expiration
+    (this week on a weekday; next week if run after Friday's close)."""
+    if not future_dates:
+        return []
+    first = date.fromisoformat(future_dates[0])
+    monday = first - timedelta(days=first.weekday())
+    lo, hi = monday.isoformat(), (monday + timedelta(days=6)).isoformat()
+    return [d for d in future_dates if lo <= d <= hi]
+
+
+def handle_expected_move(quote_client, symbol):
+    """mode=expected_move - the range check on its own, without the full
+    GEX chain pull or any AI call. Costs: 1 option-analysis call, 1
+    expirations call, 1 daily-bar (kline quota) call, 3 Yahoo VIX quotes,
+    1 D1 read. Writes nothing to D1.
+
+    Returns the anchored weekly range (fixed all week) plus two rolling
+    ranges from current spot: to the nearest expiry and to the week's
+    last expiry (what's left of the week)."""
+    now_et = datetime.now(timezone.utc).astimezone(EASTERN)
+    today_str = now_et.date().isoformat()
+    spot = get_spot_price(symbol)
+    vol = get_underlying_vol_analysis(quote_client, symbol)
+    iv, iv_source = vol["iv"], vol["iv_source"]
+
+    expirations = quote_client.get_option_expirations(symbols=[symbol])
+    future = sorted(expirations[expirations["date"] >= today_str]["date"].tolist())
+    if not future:
+        return {"error": f"No upcoming expirations found for {symbol}"}, 422
+    week_expiries = week_expiries_for_expected_move(future)
+
+    try:
+        daily_rows = fetch_daily_ohlc_rows(quote_client, symbol)
+    except Exception:
+        daily_rows = None
+
+    weekly = compute_weekly_expected_move(symbol, spot, week_expiries, daily_rows, iv, iv_source)
+
+    rolling = {}
+    rolling["to_nearest_expiry"] = compute_implied_move_1sigma(spot, iv, future[0], now_et)
+    if week_expiries and max(week_expiries) != future[0]:
+        rolling["to_week_end"] = compute_implied_move_1sigma(spot, iv, max(week_expiries), now_et)
+
+    is_weekday = now_et.weekday() < 5
+    in_hours = is_weekday and (now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+                               <= now_et <= now_et.replace(hour=16, minute=0, second=0, microsecond=0))
+    return {
+        "ticker": symbol,
+        "spot_price": round(spot, 2),
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "market_hours": in_hours,
+        "weekly_expected_move": weekly,
+        "rolling": rolling,
+        "vol_context": {
+            "iv_30d_pct": round(iv * 100, 2),
+            "iv_source": iv_source,
+            "iv_rank_52w_pct": vol["iv_rank_52w_pct"],
+            "iv_percentile_52w_pct": vol["iv_percentile_52w_pct"],
+            "iv_rank_raw": vol["iv_rank_raw"],
+            "vix_term_structure": fetch_vix_term_structure(),
+        },
+    }, 200
+
+
 # ---- Opening-gap-through-wall check ----
 # "Concentrated" wall threshold in $M of |net GEX|, per ticker. SPY walls
 # routinely run into the hundreds of millions, so only $1B+ counts there.
@@ -1596,6 +1661,21 @@ class handler(BaseHTTPRequestHandler):
             # Chart Analysis mode: a pure price-action technical read from
             # Tiger's daily bars, deliberately separate from GEX reasoning.
             # Usage: /api/get-tiger-gex?mode=chart_analysis&symbol=SPY
+            # Usage: /api/get-tiger-gex?mode=expected_move&symbol=SPY
+            # Standalone range check - no chain pull, no AI, no D1 write.
+            if query.get("mode", [None])[0] == "expected_move":
+                em_symbol = query.get("symbol", ["SPY"])[0].upper()
+                try:
+                    body, status = handle_expected_move(get_quote_client(), em_symbol)
+                except Exception as e:
+                    body, status = {"error": "Expected move check failed", "detail": str(e)}, 502
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps(body, default=str).encode())
+                return
+
             if query.get("mode", [None])[0] == "chart_analysis":
                 chart_symbol = query.get("symbol", ["SPY"])[0].upper()
                 try:
@@ -1859,12 +1939,7 @@ class handler(BaseHTTPRequestHandler):
                 daily_rows = None  # both consumers report "unavailable" on their own
             # Target week = the week of the nearest upcoming expiration (this
             # week on a weekday; next week if run after Friday's close).
-            first_future = date.fromisoformat(future["date"].tolist()[0])
-            em_monday = first_future - timedelta(days=first_future.weekday())
-            week_expiries_for_em = [
-                d for d in future["date"].tolist()
-                if em_monday.isoformat() <= d <= (em_monday + timedelta(days=6)).isoformat()
-            ]
+            week_expiries_for_em = week_expiries_for_expected_move(sorted(future["date"].tolist()))
 
             # ---- DATA QUALITY CHECKS ----
             # Aggregate, human-readable pass/warn checks on top of the raw
