@@ -258,32 +258,59 @@ if showStatus and barstate.islast
 // entry - see the PDF for the premium-based exits).
 fmtPx(float x) => na(x) ? "-" : str.tostring(x, "#.##")
 var table plans = table.new(plansPos == "top right" ? position.top_right : plansPos == "bottom left" ? position.bottom_left :
-     plansPos == "top left" ? position.top_left : position.middle_right, 8, 11,
+     plansPos == "top left" ? position.top_left : position.middle_right, 8, 12,
      bgcolor = color.new(#131722, 5), border_color = color.new(#363A45, 0), border_width = 1)
-if showPlans and barstate.islast and plName.size() > 0
-    table.clear(plans, 0, 0, 7, 10)  // drop cells left over from the wider layout
+// Weekly expected-move range from the WK lines (lowest / highest), for
+// the extra row at the bottom of the plans box.
+float wkLo = na
+float wkHi = na
+if codes.size() > 0
+    for j = 0 to codes.size() - 1
+        if codes.get(j) == "WK"
+            pj = prices.get(j)
+            wkLo := na(wkLo) ? pj : math.min(wkLo, pj)
+            wkHi := na(wkHi) ? pj : math.max(wkHi, pj)
+hasWk = gWk and not na(wkLo) and not na(wkHi) and wkHi > wkLo
+
+if showPlans and barstate.islast and (plName.size() > 0 or hasWk)
+    table.clear(plans, 0, 0, 7, 11)  // drop cells left over from the wider layout
     hdr = plansFull ? array.from("Plan", "Contracts", "Entry", "50% tgt", "Stop", "Inval", "Trade", "vs entry") :
          array.from("Plan", "Contracts", "Entry", "50% tgt", "Stop", "vs entry")
     for c = 0 to hdr.size() - 1
         table.cell(plans, c, 0, hdr.get(c), text_color = color.gray, text_size = size.small)
-    for i = 0 to math.min(plName.size(), 10) - 1
-        r = i + 1
-        e = plEntry.get(i)
-        d = na(e) ? na : close - e
-        string dist = na(d) ? "-" : math.abs(d) <= atEntryPts ? "AT ENTRY" : (d > 0 ? "+" : "") + str.tostring(d, "#.##")
-        color distBg = na(d) ? na : math.abs(d) <= atEntryPts ? color.new(cEntry, 20) : na
-        selected = planSel == "S" + str.tostring(i + 1)
-        color rowBg = selected ? color.new(color.white, 88) : na
-        color nameCol = planSel == "All" or selected ? color.white : color.gray
-        table.cell(plans, 0, r, plName.get(i), text_color = nameCol, bgcolor = rowBg, text_size = size.small, text_halign = text.align_left)
-        table.cell(plans, 1, r, plQty.size() > i ? plQty.get(i) : "-", text_color = color.white, bgcolor = rowBg, text_size = size.small)
-        table.cell(plans, 2, r, fmtPx(e), text_color = cEntry, bgcolor = rowBg, text_size = size.small)
-        table.cell(plans, 3, r, fmtPx(plTgt.get(i)), text_color = cTarget, bgcolor = rowBg, text_size = size.small)
-        table.cell(plans, 4, r, fmtPx(plStop.get(i)), text_color = cStopPx, bgcolor = rowBg, text_size = size.small)
-        if plansFull
-            table.cell(plans, 5, r, fmtPx(plInv.get(i)), text_color = cInval, bgcolor = rowBg, text_size = size.small)
-            table.cell(plans, 6, r, plInfo.get(i), text_color = color.silver, bgcolor = rowBg, text_size = size.small, text_halign = text.align_left)
-        table.cell(plans, plansFull ? 7 : 5, r, dist, text_color = color.white, bgcolor = na(distBg) ? rowBg : distBg, text_size = size.small)
+    if plName.size() > 0
+        for i = 0 to math.min(plName.size(), 10) - 1
+            r = i + 1
+            e = plEntry.get(i)
+            d = na(e) ? na : close - e
+            string dist = na(d) ? "-" : math.abs(d) <= atEntryPts ? "AT ENTRY" : (d > 0 ? "+" : "") + str.tostring(d, "#.##")
+            color distBg = na(d) ? na : math.abs(d) <= atEntryPts ? color.new(cEntry, 20) : na
+            selected = planSel == "S" + str.tostring(i + 1)
+            color rowBg = selected ? color.new(color.white, 88) : na
+            color nameCol = planSel == "All" or selected ? color.white : color.gray
+            table.cell(plans, 0, r, plName.get(i), text_color = nameCol, bgcolor = rowBg, text_size = size.small, text_halign = text.align_left)
+            table.cell(plans, 1, r, plQty.size() > i ? plQty.get(i) : "-", text_color = color.white, bgcolor = rowBg, text_size = size.small)
+            table.cell(plans, 2, r, fmtPx(e), text_color = cEntry, bgcolor = rowBg, text_size = size.small)
+            table.cell(plans, 3, r, fmtPx(plTgt.get(i)), text_color = cTarget, bgcolor = rowBg, text_size = size.small)
+            table.cell(plans, 4, r, fmtPx(plStop.get(i)), text_color = cStopPx, bgcolor = rowBg, text_size = size.small)
+            if plansFull
+                table.cell(plans, 5, r, fmtPx(plInv.get(i)), text_color = cInval, bgcolor = rowBg, text_size = size.small)
+                table.cell(plans, 6, r, plInfo.get(i), text_color = color.silver, bgcolor = rowBg, text_size = size.small, text_halign = text.align_left)
+            table.cell(plans, plansFull ? 7 : 5, r, dist, text_color = color.white, bgcolor = na(distBg) ? rowBg : distBg, text_size = size.small)
+    if hasWk
+        wr = math.min(plName.size(), 10) + 1
+        lastCol = plansFull ? 7 : 5
+        string wkPos = close > wkHi ? "ABOVE +" + str.tostring(close - wkHi, "#.##") :
+             close < wkLo ? "BELOW -" + str.tostring(wkLo - close, "#.##") :
+             "inside · " + str.tostring(math.min(wkHi - close, close - wkLo), "#.##") + " to edge"
+        color wkPosBg = close > wkHi or close < wkLo ? color.new(cWeekly, 30) : na
+        table.cell(plans, 0, wr, "Wk 1σ range", text_color = cWeekly, text_size = size.small, text_halign = text.align_left)
+        table.cell(plans, 1, wr, "", text_size = size.small)
+        table.cell(plans, 2, wr, fmtPx(wkLo) + "  –  " + fmtPx(wkHi), text_color = cWeekly, text_size = size.small)
+        for c = 3 to lastCol - 1
+            table.cell(plans, c, wr, "", text_size = size.small)
+        table.merge_cells(plans, 2, wr, lastCol - 1, wr)
+        table.cell(plans, lastCol, wr, wkPos, text_color = color.white, bgcolor = wkPosBg, text_size = size.small)
 
 // ── Alerts: one TradingView alert covers every plan and every event.
 // Create it with Condition = "C&T" -> "Any alert() function call".
