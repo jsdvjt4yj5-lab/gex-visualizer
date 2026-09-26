@@ -2286,6 +2286,59 @@ function parseFlowCsv(text) {
   return rows;
 }
 
+// ---- Time-of-trade helpers for EOD flow ----
+// Bullflow's export has time_of_trade (HH:MM:SS, US Eastern) and
+// unixTimestamp (seconds) on every row. Windows cover the regular session
+// plus 16:00-16:15, when SPY/index options still trade after the close.
+const FLOW_TIME_WINDOWS = [
+  { key: 'open', label: 'Open 09:30-10:30', from: '09:30', to: '10:30' },
+  { key: 'morning', label: 'Morning 10:30-12:00', from: '10:30', to: '12:00' },
+  { key: 'midday', label: 'Midday 12:00-14:00', from: '12:00', to: '14:00' },
+  { key: 'afternoon', label: 'Afternoon 14:00-15:00', from: '14:00', to: '15:00' },
+  { key: 'power_hour', label: 'Power hour 15:00-16:00', from: '15:00', to: '16:00' },
+  { key: 'after_close', label: 'After close 16:00+', from: '16:00', to: '99:99' },
+];
+// A cluster whose prints all land within this many minutes is most
+// likely one order worked in pieces; spread over at least this many
+// minutes it's repeated interest through the session.
+const WORKED_ORDER_MAX_MIN = 5;
+const REPEATED_MIN_SPAN_MIN = 60;
+
+function flowTradeTs(r) {
+  const n = parseInt(r.unixTimestamp, 10);
+  return Number.isFinite(n) ? n : null;
+}
+function flowHHMM(r) {
+  const t = (r.time_of_trade || '').trim();
+  return /^\d{2}:\d{2}/.test(t) ? t.slice(0, 5) : null;
+}
+
+// ---- Days-to-expiry helpers for EOD flow ----
+// A whole-day put/call split mixes 0DTE with multi-year LEAPS, which
+// answer very different questions: near-dated flow interacts with this
+// week's dealer gamma (what Coffee and Tea trades against); long-dated
+// flow is positioning/hedging context. Buckets split them apart.
+const FLOW_EXPIRY_BUCKETS = [
+  { key: '0dte', label: '0DTE', min: 0, max: 0 },
+  { key: '1_7d', label: '1-7 days', min: 1, max: 7 },
+  { key: '8_45d', label: '8-45 days', min: 8, max: 45 },
+  { key: '46_180d', label: '46-180 days', min: 46, max: 180 },
+  { key: 'leaps', label: '181+ days (LEAPS)', min: 181, max: Infinity },
+];
+const NEAR_DATED_MAX_DTE = 7;
+
+// Bullflow writes expirationDate as YY-MM-DD; accept YYYY-MM-DD too.
+function flowExpiryIso(exp) {
+  const e = (exp || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(e)) return e;
+  if (/^\d{2}-\d{2}-\d{2}$/.test(e)) return `20${e}`;
+  return null;
+}
+function flowDaysBetween(fromIso, toIso) {
+  if (!fromIso || !toIso) return null;
+  return Math.round((Date.parse(`${toIso}T00:00:00Z`) - Date.parse(`${fromIso}T00:00:00Z`)) / 86400000);
+}
+
 function computeFlowStats(rows) {
   const num = (v) => {
     const n = parseFloat(v);
@@ -2295,7 +2348,16 @@ function computeFlowStats(rows) {
   let callPremium = 0, putPremium = 0;
   let sweepPremium = 0, blockPremium = 0;
   let aggBuyPremium = 0, aggSellPremium = 0, midPremium = 0;
+  // The session's trade date in US Eastern time, from the earliest print
+  // (falls back to today's ET date if the export has no timestamps).
+  const allTs = rows.map(flowTradeTs).filter((t) => t !== null);
+  const tradeDate = allTs.length
+    ? easternDateStr(new Date(Math.min(...allTs) * 1000))
+    : todayEasternDateStr();
+  const rowDte = (r) => flowDaysBetween(tradeDate, flowExpiryIso(r.expirationDate));
+
   const clusters = {}; // key: strike|expiration|optionType
+  const contractsAtTs = {}; // unixTimestamp -> Set of contract keys printed that second
 
   rows.forEach((r) => {
     const premium = num(r.premium) || 0;
@@ -2318,23 +2380,119 @@ function computeFlowStats(rows) {
         premium: 0,
         count: 0,
         maxScore: 0,
+        firstTs: null,
+        lastTs: null,
+        firstTime: null,
+        lastTime: null,
       };
     }
     clusters[key].premium += premium;
     clusters[key].count += 1;
+    const ts = flowTradeTs(r);
+    if (ts !== null) {
+      const c = clusters[key];
+      if (c.firstTs === null || ts < c.firstTs) { c.firstTs = ts; c.firstTime = r.time_of_trade || null; }
+      if (c.lastTs === null || ts > c.lastTs) { c.lastTs = ts; c.lastTime = r.time_of_trade || null; }
+      (contractsAtTs[ts] ||= new Set()).add(key);
+    }
     const score = num(r.score);
     if (score !== null && score > clusters[key].maxScore) clusters[key].maxScore = score;
   });
 
   const totalPremium = callPremium + putPremium;
-  const spotPrices = rows.map((r) => num(r.spotPrice)).filter((v) => v !== null);
-  const spotPrice = spotPrices.length ? spotPrices[spotPrices.length - 1] : null;
+  // Spot at the day's first and last print, ordered by timestamp rather
+  // than trusting the CSV's row order (falls back to row order if the
+  // export has no unixTimestamp column).
+  const spotRows = rows
+    .map((r, i) => ({ spot: num(r.spotPrice), ts: flowTradeTs(r), i }))
+    .filter((x) => x.spot !== null)
+    .sort((a, b) => (a.ts ?? a.i) - (b.ts ?? b.i));
+  const spotOpen = spotRows.length ? spotRows[0].spot : null;
+  const spotPrice = spotRows.length ? spotRows[spotRows.length - 1].spot : null;
   const ticker = rows.length ? (rows[0].tickerSymbol || rows[0].Symbol || 'UNKNOWN').split(':')[0] : 'UNKNOWN';
 
   const topClusters = Object.values(clusters)
     .filter((c) => c.count >= 2) // repeated trades only - single prints aren't "clusters"
     .sort((a, b) => b.premium - a.premium)
-    .slice(0, 8);
+    .slice(0, 8)
+    .map((c) => {
+      const spanMin = c.firstTs !== null && c.lastTs !== null ? Math.round((c.lastTs - c.firstTs) / 60) : null;
+      const timingPattern = spanMin === null ? 'unknown'
+        : spanMin <= WORKED_ORDER_MAX_MIN ? 'single_order_worked'
+        : spanMin >= REPEATED_MIN_SPAN_MIN ? 'repeated_through_session'
+        : 'clustered_within_hour';
+      // Other contracts that printed in the exact same second as this
+      // cluster's first print - usually the other legs of one spread.
+      const selfKey = `${c.strike}|${c.expiration}|${c.optionType}`;
+      const sameSecond = c.firstTs !== null
+        ? [...(contractsAtTs[c.firstTs] || [])].filter((k) => k !== selfKey)
+        : [];
+      const { firstTs, lastTs, firstTime, lastTime, ...rest } = c;
+      const dte = flowDaysBetween(tradeDate, flowExpiryIso(c.expiration));
+      const bucket = dte === null ? null : FLOW_EXPIRY_BUCKETS.find((b) => dte >= b.min && dte <= b.max);
+      return {
+        ...rest,
+        days_to_expiry: dte,
+        expiry_bucket: bucket ? bucket.label : null,
+        first_time: firstTime,
+        last_time: lastTime,
+        span_minutes: spanMin,
+        timing_pattern: timingPattern,
+        likely_multi_leg: sameSecond.length > 0,
+        same_second_legs: sameSecond.slice(0, 4).map((k) => {
+          const [strike, exp, type] = k.split('|');
+          return `${strike}${type} ${exp}`;
+        }),
+      };
+    });
+
+  // Premium, put share and aggression per time-of-day window.
+  const hasTimes = rows.some((r) => flowHHMM(r) !== null);
+  const timeWindows = !hasTimes ? [] : FLOW_TIME_WINDOWS.map((w) => {
+    let prem = 0, put = 0, buy = 0, sell = 0, n = 0;
+    rows.forEach((r) => {
+      const t = flowHHMM(r);
+      if (t === null || t < w.from || t >= w.to) return;
+      const p = num(r.premium) || 0;
+      n += 1; prem += p;
+      if (r.optionType === 'P') put += p;
+      if (r.spreadExecution === 'Ask' || r.spreadExecution === 'Above Ask') buy += p;
+      else if (r.spreadExecution === 'Bid' || r.spreadExecution === 'Below Bid') sell += p;
+    });
+    return {
+      window: w.label,
+      trade_count: n,
+      premium: Math.round(prem),
+      pct_of_day_premium: totalPremium ? +(prem / totalPremium * 100).toFixed(1) : null,
+      put_pct: prem ? +(put / prem * 100).toFixed(1) : null,
+      aggressive_buy_premium: Math.round(buy),
+      aggressive_sell_premium: Math.round(sell),
+    };
+  }).filter((w) => w.trade_count > 0);
+
+  const aggregate = (subset) => {
+    let prem = 0, put = 0, buy = 0, sell = 0;
+    subset.forEach((r) => {
+      const p = num(r.premium) || 0;
+      prem += p;
+      if (r.optionType === 'P') put += p;
+      if (r.spreadExecution === 'Ask' || r.spreadExecution === 'Above Ask') buy += p;
+      else if (r.spreadExecution === 'Bid' || r.spreadExecution === 'Below Bid') sell += p;
+    });
+    return {
+      trade_count: subset.length,
+      premium: Math.round(prem),
+      pct_of_day_premium: totalPremium ? +(prem / totalPremium * 100).toFixed(1) : null,
+      put_pct: prem ? +(put / prem * 100).toFixed(1) : null,
+      aggressive_buy_premium: Math.round(buy),
+      aggressive_sell_premium: Math.round(sell),
+    };
+  };
+  const expiryBuckets = FLOW_EXPIRY_BUCKETS.map((b) => ({
+    bucket: b.label,
+    ...aggregate(rows.filter((r) => { const d = rowDte(r); return d !== null && d >= b.min && d <= b.max; })),
+  })).filter((b) => b.trade_count > 0);
+  const nearDated = aggregate(rows.filter((r) => { const d = rowDte(r); return d !== null && d >= 0 && d <= NEAR_DATED_MAX_DTE; }));
 
   // For the chart: top strikes by combined premium (put+call together)
   const byStrike = {};
@@ -2354,6 +2512,7 @@ function computeFlowStats(rows) {
   return {
     ticker,
     spot_price: spotPrice,
+    spot_open: spotOpen,
     trade_count: rows.length,
     call_premium: Math.round(callPremium),
     put_premium: Math.round(putPremium),
@@ -2364,6 +2523,10 @@ function computeFlowStats(rows) {
     aggressive_buy_premium: Math.round(aggBuyPremium),
     aggressive_sell_premium: Math.round(aggSellPremium),
     top_clusters: topClusters,
+    time_windows: timeWindows,
+    trade_date: tradeDate,
+    expiry_buckets: expiryBuckets,
+    near_dated_0_7d: nearDated,
     top_strikes: topStrikes,
     captured_at: new Date().toISOString(),
   };
@@ -3060,6 +3223,14 @@ function buildFlowDataFromCurrent(stats) {
     aggressive_sell_usd_m: +(stats.aggressive_sell_premium / 1e6).toFixed(1),
     sweep_usd_m: +(stats.sweep_premium / 1e6).toFixed(1),
     block_usd_m: +(stats.block_premium / 1e6).toFixed(1),
+    // Same stats restricted to 0-7 DTE - the flow that actually interacts
+    // with this week's GEX walls. Absent for uploads saved before this.
+    near_dated_0_7d: stats.near_dated_0_7d ? {
+      share_of_day_pct: stats.near_dated_0_7d.pct_of_day_premium,
+      put_pct: stats.near_dated_0_7d.put_pct,
+      aggressive_buy_usd_m: +(stats.near_dated_0_7d.aggressive_buy_premium / 1e6).toFixed(1),
+      aggressive_sell_usd_m: +(stats.near_dated_0_7d.aggressive_sell_premium / 1e6).toFixed(1),
+    } : undefined,
     top_conviction_trades: (stats.top_clusters || []).slice(0, 5).map((c) => ({
       strike: c.strike,
       type: c.optionType,
@@ -3067,6 +3238,9 @@ function buildFlowDataFromCurrent(stats) {
       score: c.maxScore,
       trade_count: c.count,
       premium_usd_m: +(c.premium / 1e6).toFixed(2),
+      timing_pattern: c.timing_pattern,
+      likely_multi_leg: c.likely_multi_leg,
+      days_to_expiry: c.days_to_expiry,
     })),
   };
 }
