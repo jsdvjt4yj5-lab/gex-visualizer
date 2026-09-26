@@ -179,67 +179,222 @@ async function fetchDailyCloses(ticker, fromDateStr, toDateStr) {
   const result = data?.chart?.result?.[0];
   if (!result) return [];
   const timestamps = result.timestamp || [];
-  const closes = result.indicators?.quote?.[0]?.close || [];
+  const quote = result.indicators?.quote?.[0] || {};
+  const closes = quote.close || [];
+  const highs = quote.high || [];
+  const lows = quote.low || [];
   return timestamps
     .map((ts, i) => ({
       date: easternDateStr(new Date(ts * 1000)),
       close: closes[i],
+      // high/low feed the grader's entry-trigger check; null-safe.
+      high: typeof highs[i] === 'number' ? highs[i] : null,
+      low: typeof lows[i] === 'number' ? lows[i] : null,
     }))
     .filter((d) => typeof d.close === 'number' && d.date >= fromDateStr && d.date <= toDateStr);
 }
 
-// Walks the daily closes chronologically, re-pricing the structure each
-// day, and returns the first outcome to trigger: profit target, stop
-// loss, or (if neither fires) the expiry-day result based on final
-// intrinsic value vs. entry.
-function gradeStrategy(strategy, sessionDate, expiration, dailyCloses, ivUsedPct) {
+// ---- Grader (v2) ----
+// v1 priced the entry at the session day's CLOSE, so for same-day (0DTE)
+// sessions entry and expiry used the same price and the grade measured
+// leftover time value (a near-automatic win for credits, loss for debits),
+// not the market move. v2:
+//   - entry price = the premium Coffee and Tea actually quoted
+//     (pricing.amount_per_contract_usd, priced at priced_at_underlying at
+//     session time) - the same number the session's POP was computed from
+//   - entry check: a trigger-priced strategy only counts as entered if a
+//     day's high/low range reached its entry_level (session day through
+//     the day before expiry, or expiry day itself for 0DTE). Coarse: the
+//     day's range includes trading before the session ran, so this can
+//     count an entry that happened before the trigger was even published.
+//   - exits in the session's own rule order: invalidation level (closing
+//     basis), 50% target, 50% stop - checked on daily closes after entry;
+//     otherwise the expiry close. Intraday target/stop touches that
+//     reversed by the close are NOT seen (daily bars only).
+//   - estimated P&L per trade, and structure type from the legs.
+// Time-to-expiry follows lib/options-pricing.js's convention (trading
+// days = calendar days x 5/7, floor 1, / 252) so re-pricing stays
+// consistent with how the session priced the trade.
+
+function tradingYearsToExpiry(fromDate, expiration) {
+  if (fromDate >= expiration) return 0;
+  const calendarDays = (new Date(`${expiration}T00:00:00Z`) - new Date(`${fromDate}T00:00:00Z`)) / 86400000;
+  return Math.max(calendarDays * (5 / 7), 1) / 252;
+}
+
+// Structure type from the legs, so "Bear Call Spread 775/780" and "Bear
+// Call Spread" group together. Vocabulary matches Coffee and Tea's names.
+function classifyStructure(legs) {
+  const L = legs || [];
+  const expiries = new Set(L.map((l) => l.expiry).filter(Boolean));
+  if (expiries.size > 1) return 'Calendar / diagonal';
+  const calls = L.filter((l) => l.type === 'C');
+  const puts = L.filter((l) => l.type === 'P');
+  const vertical = (pair) => {
+    const [x, y] = [...pair].sort((m, n) => m.strike - n.strike);
+    if (!x || !y || x.action === y.action) return null;
+    const soldLower = x.action === 'sell';
+    if (x.type === 'C') return soldLower ? 'Bear call spread' : 'Long call vertical';
+    return soldLower ? 'Long put vertical' : 'Bull put spread';
+  };
+  if (L.length === 1) return L[0].action === 'buy' ? (L[0].type === 'C' ? 'Long call' : 'Long put') : 'Short single leg';
+  if (L.length === 2 && (calls.length === 2 || puts.length === 2)) return vertical(L) || 'Other';
+  if (L.length === 2 && calls.length === 1 && puts.length === 1) {
+    const same = calls[0].strike === puts[0].strike;
+    if (calls[0].action === 'buy' && puts[0].action === 'buy') return same ? 'Long straddle' : 'Long strangle';
+    if (calls[0].action === 'sell' && puts[0].action === 'sell') return same ? 'Short straddle' : 'Short strangle';
+    return 'Other';
+  }
+  if (L.length === 3 && (calls.length === 3 || puts.length === 3)) return 'Butterfly';
+  if (L.length === 4 && calls.length === 2 && puts.length === 2) {
+    const shortC = calls.find((l) => l.action === 'sell');
+    const shortP = puts.find((l) => l.action === 'sell');
+    if (shortC && shortP) return shortC.strike === shortP.strike ? 'Iron butterfly' : 'Iron condor';
+    return 'Long iron condor';
+  }
+  return 'Other';
+}
+
+function gradeStrategy(strategy, sessionDate, expiration, days, ivUsedPct) {
   const legs = strategy.legs || [];
   if (legs.length === 0) return null;
-
   const sigma = (ivUsedPct || 13) / 100;
-  const expiryDate = new Date(expiration + 'T00:00:00Z');
-  const entryDate = new Date(sessionDate + 'T00:00:00Z');
-  const T_entry = Math.max((expiryDate - entryDate) / (1000 * 60 * 60 * 24 * 365), 0.0001);
-
-  // Entry spot: approximate from the first available close on/after
-  // session_date, since the exact intraday entry spot isn't stored.
-  const entryRow = dailyCloses.find((d) => d.date >= sessionDate);
-  if (!entryRow) return null;
-  const entryValue = positionValue(legs, entryRow.close, T_entry, sigma, RISK_FREE_RATE, DIVIDEND_YIELD);
-
   const contracts = strategy.sizing?.contracts || 1;
+  const pr = strategy.pricing || {};
+  const base = { structure_type: classifyStructure(legs), credit_or_debit: pr.credit_or_debit || null };
+
+  const window = days.filter((d) => d.date >= sessionDate && d.date <= expiration);
+  if (window.length === 0) return null;
+
+  // ---- Entry
+  const entryLevel = typeof strategy.entry_level === 'number' ? strategy.entry_level : null;
+  const triggerPriced = pr.priced_at === 'entry_trigger' && entryLevel !== null;
+  let entryIdx = 0;
+  let entryValue;
+  let entryBasis;
+  let entrySpot = typeof pr.priced_at_underlying === 'number' ? pr.priced_at_underlying : null;
+  const storedValue = typeof pr.amount_per_contract_usd === 'number'
+    ? (pr.credit_or_debit === 'credit' ? -1 : 1) * pr.amount_per_contract_usd / 100
+    : null;
+
+  if (triggerPriced) {
+    // Entry days: session day through the day before expiry; for a 0DTE
+    // session the only candidate is the session (= expiry) day itself.
+    const isCandidate = (d) => sessionDate === expiration || d.date < expiration;
+    entryIdx = window.findIndex((d) => isCandidate(d) && d.high !== null && d.low !== null
+      && d.low <= entryLevel && entryLevel <= d.high);
+    if (entryIdx === -1) {
+      const noRange = window.filter(isCandidate).every((d) => d.high === null || d.low === null);
+      return {
+        ...base,
+        outcome: 'not_entered',
+        resolution_reason: noRange ? 'no_high_low_data' : 'trigger_not_reached',
+        resolution_date: window[window.length - 1].date,
+        entered: 0, entry_spot: null, entry_basis: 'entry_trigger', pnl_usd: 0,
+      };
+    }
+    entrySpot = entryLevel;
+    const entryDay = window[entryIdx].date;
+    if (entryDay === sessionDate && storedValue !== null) {
+      entryValue = storedValue;
+      entryBasis = 'entry_trigger_session_price';
+    } else {
+      // Trigger first reached on a later day - re-price at the trigger
+      // level with that day's time remaining (start of day: one trading
+      // day more than at its close).
+      const T = tradingYearsToExpiry(entryDay, expiration) + 1 / 252;
+      entryValue = positionValue(legs, entryLevel, T, sigma, RISK_FREE_RATE, DIVIDEND_YIELD);
+      entryBasis = 'entry_trigger_repriced_later_day';
+    }
+  } else if (storedValue !== null) {
+    entryValue = storedValue;
+    entryBasis = entrySpot !== null ? 'session_spot_price' : 'session_price';
+  } else {
+    // Very old session with no stored price - v1 fallback, flagged.
+    entrySpot = window[0].close;
+    entryValue = positionValue(legs, entrySpot, tradingYearsToExpiry(sessionDate, expiration), sigma, RISK_FREE_RATE, DIVIDEND_YIELD);
+    entryBasis = 'approx_session_close';
+  }
+
   const profitTargetTotal = strategy.profit_target_50pct?.total_profit_usd ?? null;
   const stopLossTotal = strategy.stop_loss?.total_loss_at_stop_usd ?? null;
+  const inv = typeof strategy.invalidation_level === 'number' ? strategy.invalidation_level : null;
+  // Which side of the invalidation level the trade lives on, judged from
+  // the entry spot (a bull put spread entered at 770 with inv 765 is
+  // invalidated by a close BELOW 765).
+  const invBelow = inv !== null && entrySpot !== null && inv !== entrySpot ? inv < entrySpot : null;
+  const entered = {
+    ...base, entered: 1, entry_basis: entryBasis,
+    entry_spot: entrySpot !== null ? Math.round(entrySpot * 100) / 100 : null,
+  };
+  const pnlAt = (close, T) => (positionValue(legs, close, T, sigma, RISK_FREE_RATE, DIVIDEND_YIELD) - entryValue) * 100 * contracts;
 
-  const pathDays = dailyCloses.filter((d) => d.date > sessionDate && d.date <= expiration);
-
-  for (const day of pathDays) {
-    const T = Math.max((expiryDate - new Date(day.date + 'T00:00:00Z')) / (1000 * 60 * 60 * 24 * 365), 0);
-    const value = positionValue(legs, day.close, T, sigma, RISK_FREE_RATE, DIVIDEND_YIELD);
-    const pnlTotal = (value - entryValue) * 100 * contracts; // per-contract $ * 100 shares * contracts
-
-    if (profitTargetTotal !== null && pnlTotal >= profitTargetTotal) {
-      return { outcome: 'win', resolution_reason: 'profit_target', resolution_date: day.date };
+  // ---- Path: closes from the entry day up to (not including) expiry day,
+  // in the session's own exit-rule order.
+  for (let i = entryIdx; i < window.length; i++) {
+    const day = window[i];
+    if (day.date >= expiration || typeof day.close !== 'number') continue;
+    const pnl = pnlAt(day.close, tradingYearsToExpiry(day.date, expiration));
+    if (invBelow !== null && (invBelow ? day.close < inv : day.close > inv)) {
+      return { ...entered, outcome: pnl > 0 ? 'win' : 'loss', resolution_reason: 'invalidation', resolution_date: day.date, pnl_usd: Math.round(pnl) };
     }
-    if (stopLossTotal !== null && pnlTotal <= -stopLossTotal) {
-      return { outcome: 'loss', resolution_reason: 'stop_loss', resolution_date: day.date };
+    if (profitTargetTotal !== null && pnl >= profitTargetTotal) {
+      return { ...entered, outcome: 'win', resolution_reason: 'profit_target', resolution_date: day.date, pnl_usd: Math.round(profitTargetTotal) };
+    }
+    if (stopLossTotal !== null && pnl <= -stopLossTotal) {
+      return { ...entered, outcome: 'loss', resolution_reason: 'stop_loss', resolution_date: day.date, pnl_usd: -Math.round(stopLossTotal) };
     }
   }
 
-  // Neither hit - resolve at expiry using the final available close.
-  const finalRow = [...dailyCloses].reverse().find((d) => d.date <= expiration);
+  // ---- Expiry: settle at intrinsic on the last close on/before expiry.
+  const finalRow = [...window].reverse().find((d) => typeof d.close === 'number');
   if (!finalRow) return null;
-  const finalValue = positionValue(legs, finalRow.close, 0, sigma, RISK_FREE_RATE, DIVIDEND_YIELD);
-  const finalPnl = (finalValue - entryValue) * 100 * contracts;
+  const finalPnl = pnlAt(finalRow.close, 0);
   return {
+    ...entered,
     outcome: finalPnl > 0 ? 'win' : 'loss',
     resolution_reason: 'expiry',
     resolution_date: finalRow.date,
+    pnl_usd: Math.round(finalPnl),
   };
 }
 
-async function handleGrade(req, res, ticker) {
+// Adds v2 columns to ct_grades if missing. Idempotent: a "duplicate
+// column" error just means it already ran.
+const GRADE_V2_COLUMNS = [
+  ['structure_type', 'TEXT'], ['credit_or_debit', 'TEXT'], ['entered', 'INTEGER'],
+  ['entry_spot', 'REAL'], ['entry_basis', 'TEXT'], ['pnl_usd', 'REAL'], ['grader_version', 'INTEGER'],
+];
+async function ensureGradeV2Columns() {
+  // One PRAGMA read normally; ALTERs only run the first time.
+  let existing = null;
+  try {
+    const cols = await runD1Query('PRAGMA table_info(ct_grades)', []);
+    existing = new Set(cols.map((c) => c.name));
+  } catch (e) {
+    existing = null; // fall through to try-every-ALTER
+  }
+  for (const [name, type] of GRADE_V2_COLUMNS) {
+    if (existing && existing.has(name)) continue;
+    try {
+      await runD1Query(`ALTER TABLE ct_grades ADD COLUMN ${name} ${type}`, []);
+    } catch (e) {
+      if (!/duplicate column/i.test(e.message)) throw e;
+    }
+  }
+}
+
+async function handleGrade(req, res, ticker, { regrade = false } = {}) {
   const today = todayEasternDateStr();
+  await ensureGradeV2Columns();
+  // Re-grade clears this ticker's grades first - otherwise INSERT OR
+  // IGNORE keeps every old (v1) grade forever.
+  let cleared = 0;
+  if (regrade) {
+    const before = await runD1Query('SELECT COUNT(*) AS n FROM ct_grades WHERE ticker = ?', [ticker]);
+    cleared = before[0]?.n ?? 0;
+    await runD1Query('DELETE FROM ct_grades WHERE ticker = ?', [ticker]);
+  }
 
   const sessions = await runD1Query(
     'SELECT session_date, expiration, output_json FROM ct_sessions WHERE ticker = ? AND expiration < ? ORDER BY session_date ASC',
@@ -276,14 +431,18 @@ async function handleGrade(req, res, ticker) {
     const ivUsedPct = output.volatility_check?.iv_used_pct;
     let sessionGraded = false;
 
-    for (const strategy of strategies) {
+    for (const [i, strategy] of strategies.entries()) {
       const grade = gradeStrategy(strategy, row.session_date, row.expiration, dailyCloses, ivUsedPct);
       if (!grade) continue;
 
       try {
+        // "S1 <name>" keeps two same-named strategies in one session from
+        // colliding on the table's key; grouping uses structure_type.
         await runD1Query(
-          'INSERT OR IGNORE INTO ct_grades (ticker, session_date, strategy_name, outcome, resolution_reason, resolution_date, predicted_pop, graded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-          [ticker, row.session_date, strategy.name, grade.outcome, grade.resolution_reason, grade.resolution_date, strategy.pop_pct ?? null, new Date().toISOString()]
+          'INSERT OR IGNORE INTO ct_grades (ticker, session_date, strategy_name, outcome, resolution_reason, resolution_date, predicted_pop, graded_at, structure_type, credit_or_debit, entered, entry_spot, entry_basis, pnl_usd, grader_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [ticker, row.session_date, `S${i + 1} ${strategy.name}`, grade.outcome, grade.resolution_reason, grade.resolution_date,
+            strategy.pop_pct ?? null, new Date().toISOString(), grade.structure_type, grade.credit_or_debit,
+            grade.entered, grade.entry_spot, grade.entry_basis, grade.pnl_usd, 2]
         );
         gradedStrategies++;
         sessionGraded = true;
@@ -296,6 +455,8 @@ async function handleGrade(req, res, ticker) {
 
   return res.status(200).json({
     ticker,
+    regraded: regrade,
+    grades_cleared: cleared,
     sessions_checked: sessions.length,
     sessions_graded: gradedSessions,
     strategies_graded: gradedStrategies,
@@ -304,59 +465,79 @@ async function handleGrade(req, res, ticker) {
 }
 
 async function handleWeeklySummary(req, res, ticker) {
+  const windowDays = Math.min(Math.max(parseInt(req.query.days, 10) || 7, 1), 90);
   const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - 7);
+  cutoff.setDate(cutoff.getDate() - windowDays);
   const cutoffDate = easternDateStr(cutoff);
 
-  const grades = await runD1Query(
-    'SELECT strategy_name, outcome, resolution_reason, predicted_pop FROM ct_grades WHERE ticker = ? AND resolution_date >= ? ORDER BY resolution_date ASC',
+  await ensureGradeV2Columns();
+  const rows = await runD1Query(
+    'SELECT strategy_name, outcome, resolution_reason, predicted_pop, structure_type, credit_or_debit, entered, entry_basis, pnl_usd, grader_version FROM ct_grades WHERE ticker = ? AND resolution_date >= ? ORDER BY resolution_date ASC',
     [ticker, cutoffDate]
   );
 
-  if (grades.length === 0) {
+  if (rows.length === 0) {
     return res.status(200).json({
-      ticker,
-      graded_count: 0,
-      message: 'No graded strategies in the last 7 days - run action=grade after some sessions have resolved (past their expiration).',
+      ticker, window_days: windowDays, graded_count: 0,
+      message: `No graded strategies in the last ${windowDays} days - run grading after some sessions have resolved (past their expiration).`,
     });
   }
 
+  const v1Rows = rows.filter((g) => g.grader_version !== 2).length;
+  const notEntered = rows.filter((g) => g.outcome === 'not_entered');
+  const grades = rows.filter((g) => g.outcome === 'win' || g.outcome === 'loss');
   const wins = grades.filter((g) => g.outcome === 'win');
   const losses = grades.filter((g) => g.outcome === 'loss');
-  const winRatePct = +((wins.length / grades.length) * 100).toFixed(1);
+  const pct = (a, b) => (b ? +((a / b) * 100).toFixed(1) : null);
+  const avg = (arr) => (arr.length ? +(arr.reduce((s, v) => s + v, 0) / arr.length).toFixed(1) : null);
+  const pnls = (arr) => arr.map((g) => g.pnl_usd).filter((v) => typeof v === 'number');
+  const sum = (arr) => Math.round(arr.reduce((s, v) => s + v, 0));
 
-  const byName = {};
-  grades.forEach((g) => {
-    if (!byName[g.strategy_name]) byName[g.strategy_name] = { total: 0, wins: 0 };
-    byName[g.strategy_name].total++;
-    if (g.outcome === 'win') byName[g.strategy_name].wins++;
-  });
-  const winRateByStrategy = Object.entries(byName).map(([name, s]) => ({
-    strategy_name: name,
-    total: s.total,
-    win_rate_pct: +((s.wins / s.total) * 100).toFixed(1),
-  }));
+  const group = (keyFn) => {
+    const m = {};
+    grades.forEach((g) => {
+      const k = keyFn(g) || 'Unclassified (old grade)';
+      (m[k] = m[k] || []).push(g);
+    });
+    return Object.entries(m)
+      .map(([name, gs]) => {
+        const w = gs.filter((g) => g.outcome === 'win');
+        const l = gs.filter((g) => g.outcome === 'loss');
+        return {
+          name,
+          total: gs.length,
+          win_rate_pct: pct(w.length, gs.length),
+          total_pnl_usd: sum(pnls(gs)),
+          avg_win_usd: avg(pnls(w)),
+          avg_loss_usd: avg(pnls(l)),
+        };
+      })
+      .sort((a, b) => b.total - a.total);
+  };
 
-  // POP calibration: if predicted POP is trustworthy, average predicted
-  // POP for winners should roughly track the actual win rate, and should
-  // be meaningfully higher than the average predicted POP for losers.
-  const avg = (arr) => arr.length ? +(arr.reduce((s, v) => s + v, 0) / arr.length).toFixed(1) : null;
-  const winPops = wins.map((g) => g.predicted_pop).filter((v) => v !== null && v !== undefined);
-  const lossPops = losses.map((g) => g.predicted_pop).filter((v) => v !== null && v !== undefined);
+  const pops = (arr) => arr.map((g) => g.predicted_pop).filter((v) => typeof v === 'number');
 
   return res.status(200).json({
     ticker,
-    window_days: 7,
+    window_days: windowDays,
     graded_count: grades.length,
-    win_rate_pct: winRatePct,
+    not_entered_count: notEntered.length,
+    v1_grades_in_window: v1Rows, // >0: old-grader rows mixed in - re-grade to clear them
+    win_rate_pct: pct(wins.length, grades.length),
     wins: wins.length,
     losses: losses.length,
-    win_rate_by_strategy: winRateByStrategy,
+    total_pnl_usd: sum(pnls(grades)),
+    avg_win_usd: avg(pnls(wins)),
+    avg_loss_usd: avg(pnls(losses)),
+    by_structure: group((g) => g.structure_type),
+    by_credit_debit: group((g) => g.credit_or_debit),
     pop_calibration: {
-      avg_predicted_pop_for_wins: avg(winPops),
-      avg_predicted_pop_for_losses: avg(lossPops),
-      note: 'If the GEX thesis is well-calibrated, avg predicted POP for wins should track the actual win rate above, and should sit meaningfully higher than avg predicted POP for losses.',
+      avg_predicted_pop_all: avg(pops(grades)),
+      avg_predicted_pop_for_wins: avg(pops(wins)),
+      avg_predicted_pop_for_losses: avg(pops(losses)),
+      note: 'Well-calibrated POP: the average predicted POP across entered trades should roughly match the actual win rate, and wins should carry higher predicted POP than losses. Under ~30 trades, gaps of 10+ points are still noise.',
     },
+    grading_notes: "Estimated from daily bars and Black-Scholes at the session's IV, not real fills. Entry is detected from the day's high/low (can count entries from before the session ran); exits use closes only, so intraday target/stop touches that reversed are missed.",
   });
 }
 
@@ -541,9 +722,10 @@ export default async function handler(req, res) {
   try {
     if (resolvedAction === 'history') return await handleHistory(req, res, tickerUpper);
     if (resolvedAction === 'grade') return await handleGrade(req, res, tickerUpper);
+    if (resolvedAction === 'regrade') return await handleGrade(req, res, tickerUpper, { regrade: true });
     if (resolvedAction === 'weekly-summary') return await handleWeeklySummary(req, res, tickerUpper);
     if (resolvedAction === 'implied-move-summary') return await handleImpliedMoveSummary(req, res, tickerUpper);
-    return res.status(400).json({ error: 'action must be "history", "grade", "weekly-summary", or "implied-move-summary"' });
+    return res.status(400).json({ error: 'action must be "history", "grade", "regrade", "weekly-summary", or "implied-move-summary"' });
   } catch (err) {
     return res.status(500).json({ error: 'Server error', detail: String(err) });
   }

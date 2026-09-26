@@ -289,6 +289,7 @@
   <div class="controls" style="margin-top:0;">
     <button id="gradeBtn" type="button">Grade resolved sessions</button>
     <button id="summaryBtn" type="button">Show weekly summary</button>
+    <button id="regradeBtn" type="button" title="Deletes this ticker's grades and re-grades every resolved session with the current grader">Re-grade all</button>
   </div>
   <div class="status" id="backtestStatus"></div>
   <div id="backtestOutput" style="margin-top:12px;"></div>
@@ -4058,6 +4059,30 @@ async function runGrading() {
   }
 }
 
+async function runRegrade() {
+  const ticker = tickerFilter.value || currentData?.ticker;
+  if (!ticker) {
+    setBacktestStatus('Select a ticker first (use the filter dropdown below, or load a snapshot).', true);
+    return;
+  }
+  if (!confirm(`Delete all ${ticker} grades and re-grade every resolved session with the current grader?`)) return;
+  const regradeBtn = document.getElementById('regradeBtn');
+  regradeBtn.disabled = true;
+  setBacktestStatus(`Re-grading ${ticker}...`);
+  try {
+    const res = await fetch(`/api/get-snapshot-history?action=regrade&ticker=${encodeURIComponent(ticker)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+    setBacktestStatus(`Cleared ${data.grades_cleared} old grade(s); re-graded ${data.strategies_graded} strategy result(s) across ${data.sessions_graded} of ${data.sessions_checked} session(s).`);
+    backtestOutput.innerHTML = data.errors?.length
+      ? `<div style="color:#999; font-size:12.5px;">${data.errors.length} session(s) skipped (no price data) - not necessarily a problem.</div>` : '';
+  } catch (err) {
+    setBacktestStatus('Re-grade failed: ' + err.message, true);
+  } finally {
+    regradeBtn.disabled = false;
+  }
+}
+
 async function showWeeklySummary() {
   const ticker = tickerFilter.value || currentData?.ticker;
   if (!ticker) {
@@ -4077,22 +4102,27 @@ async function showWeeklySummary() {
       return;
     }
 
-    const byStrategyRows = data.win_rate_by_strategy
-      .map((s) => `<tr><td style="padding:3px 8px;">${s.strategy_name}</td><td style="padding:3px 8px; text-align:right;">${s.total}</td><td style="padding:3px 8px; text-align:right;">${s.win_rate_pct}%</td></tr>`)
-      .join('');
-
+    const usd = (v) => (v == null ? '—' : `${v < 0 ? '-' : ''}$${Math.abs(Math.round(v)).toLocaleString()}`);
+    const pnlColor = (v) => (v == null ? '#ddd' : v >= 0 ? '#199e70' : '#e66767');
+    const th = (t, right) => `<th style="padding:3px 8px; color:#999; text-align:${right ? 'right' : 'left'};">${t}</th>`;
+    const td = (t, right, color) => `<td style="padding:3px 8px;${right ? ' text-align:right;' : ''}${color ? ` color:${color};` : ''}">${t}</td>`;
+    const groupTable = (rows, label) => `
+      <table style="border-collapse:collapse; font-size:12.5px; margin-top:6px;">
+        <tr>${th(label)}${th('Count', 1)}${th('Win rate', 1)}${th('Est. P&L', 1)}${th('Avg win', 1)}${th('Avg loss', 1)}</tr>
+        ${rows.map((r) => `<tr>${td(r.name)}${td(r.total, 1)}${td(r.win_rate_pct + '%', 1)}${td(usd(r.total_pnl_usd), 1, pnlColor(r.total_pnl_usd))}${td(usd(r.avg_win_usd), 1)}${td(usd(r.avg_loss_usd), 1)}</tr>`).join('')}
+      </table>`;
+    const pc = data.pop_calibration;
     backtestOutput.innerHTML = `
       <div style="font-size:14px; line-height:1.6;">
-        <p><b>${data.win_rate_pct}%</b> win rate over the last 7 days (${data.wins} win${data.wins === 1 ? '' : 's'} / ${data.losses} loss${data.losses === 1 ? '' : 'es'}, ${data.graded_count} graded).</p>
-        <table style="border-collapse:collapse; font-size:12.5px; margin-top:6px;">
-          <tr><th style="padding:3px 8px; color:#999; text-align:left;">Strategy</th><th style="padding:3px 8px; color:#999; text-align:right;">Count</th><th style="padding:3px 8px; color:#999; text-align:right;">Win rate</th></tr>
-          ${byStrategyRows}
-        </table>
+        ${data.v1_grades_in_window ? `<p style="color:#f0a030;">${data.v1_grades_in_window} grade(s) here are from the old grader - tap "Re-grade all" to replace them.</p>` : ''}
+        <p><b>${data.win_rate_pct ?? '—'}%</b> win rate over the last ${data.window_days} days (${data.wins} win${data.wins === 1 ? '' : 's'} / ${data.losses} loss${data.losses === 1 ? '' : 'es'} of ${data.graded_count} entered${data.not_entered_count ? `; ${data.not_entered_count} trigger${data.not_entered_count === 1 ? '' : 's'} never reached` : ''}).</p>
+        <p>Est. P&amp;L: <b style="color:${pnlColor(data.total_pnl_usd)};">${usd(data.total_pnl_usd)}</b> · avg win ${usd(data.avg_win_usd)} · avg loss ${usd(data.avg_loss_usd)}</p>
+        ${groupTable(data.by_structure || [], 'Structure')}
+        ${groupTable(data.by_credit_debit || [], 'Credit / debit')}
         <p style="margin-top:10px; font-size:12.5px; color:#999;">
-          Predicted POP — wins: ${data.pop_calibration.avg_predicted_pop_for_wins ?? '—'}%,
-          losses: ${data.pop_calibration.avg_predicted_pop_for_losses ?? '—'}%.
-          ${data.pop_calibration.note}
+          Predicted POP — all entered: ${pc.avg_predicted_pop_all ?? '—'}% (vs ${data.win_rate_pct ?? '—'}% actual) · wins: ${pc.avg_predicted_pop_for_wins ?? '—'}% · losses: ${pc.avg_predicted_pop_for_losses ?? '—'}%. ${pc.note}
         </p>
+        <p style="font-size:12px; color:#777;">${data.grading_notes}</p>
       </div>
     `;
     setBacktestStatus('');
@@ -4105,6 +4135,7 @@ async function showWeeklySummary() {
 
 gradeBtn.addEventListener('click', runGrading);
 summaryBtn.addEventListener('click', showWeeklySummary);
+document.getElementById('regradeBtn').addEventListener('click', runRegrade);
 
 // ---- Analysis Logs tab switching ----
 const gexLogTab = document.getElementById('gexLogTab');
