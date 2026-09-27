@@ -331,6 +331,19 @@ class WeeklyExpectedMove(BaseModel):
     spot_position: Optional[str] = None
 
 
+class DailyExpectedMove(BaseModel):
+    status: str
+    detail: Optional[str] = None
+    target_date: Optional[str] = None
+    anchor_close: Optional[float] = None
+    anchor_date: Optional[str] = None
+    one_sigma_move_pct: Optional[float] = None
+    range_1sigma: Optional[WeeklyRange] = None
+    spot: Optional[float] = None
+    spot_sigma_from_anchor: Optional[float] = None
+    spot_position: Optional[str] = None
+
+
 class ReasoningOutput(BaseModel):
     market_structure: MarketStructure
     macro_context: MacroContext
@@ -349,6 +362,7 @@ class ReasoningOutput(BaseModel):
     # sessions stored before this existed still render.
     gap_check: Optional[GapCheck] = None
     weekly_expected_move: Optional[WeeklyExpectedMove] = None
+    daily_expected_move: Optional[DailyExpectedMove] = None
 
     @model_validator(mode="after")
     def at_least_one_strategy(self):
@@ -828,7 +842,19 @@ def build_weekly_em(S, w):
         S.append(Paragraph(f"Spot ${w.spot:.2f} is {w.spot_sigma_from_anchor:+g}&sigma; from the anchor &mdash; {pos}.", BODY))
 
 
-def build_vol_check(S, vc, ctx, weekly=None):
+def build_daily_em(S, d):
+    if not d or d.status != "ok" or not d.range_1sigma:
+        return
+    r = d.range_1sigma
+    pos = "" if d.spot_sigma_from_anchor is None else (
+        f" Spot {d.spot_sigma_from_anchor:+g}&sigma; from anchor &mdash; "
+        + ("inside." if d.spot_position == "inside" else f"<font color='#c06000'><b>{d.spot_position} the range</b></font>."))
+    S.append(Paragraph(
+        f"<b>Daily expected move for {d.target_date}: ${r.low:.2f}&ndash;${r.high:.2f}</b> "
+        f"(&plusmn;{d.one_sigma_move_pct:g}%, 1&sigma; from the {d.anchor_date} close of ${d.anchor_close:.2f}).{pos}", BODY))
+
+
+def build_vol_check(S, vc, ctx, weekly=None, daily=None):
     S.append(_h(5, "Realized vs. Implied Vol"))
     rv_missing = ctx is not None and ctx.get("realized_vol_20d_pct") is None
     if rv_missing:
@@ -859,6 +885,7 @@ def build_vol_check(S, vc, ctx, weekly=None):
             S.append(Paragraph(" &nbsp;&middot;&nbsp; ".join(parts), BODY))
     if vc.vol_regime_note:
         S.append(Paragraph(f"<i>{vc.vol_regime_note}</i>", BODY))
+    build_daily_em(S, daily)
     build_weekly_em(S, weekly)
     S.append(Paragraph(f"<b>Verdict: {vc.verdict.upper()}.</b> {vc.strategy_tilt}", BODY))
     S.append(Spacer(1, 4))
@@ -1015,7 +1042,7 @@ def generate_pdf(output: ReasoningOutput, session_date: str, expiration: str,
     build_day_over_day(S, output.day_over_day_comparison, input_context)
     build_flow_context(S, output.eod_flow_context)
     build_macro_context(S, output.macro_context, input_context, session_date, expiration)
-    build_vol_check(S, output.volatility_check, input_context, output.weekly_expected_move)
+    build_vol_check(S, output.volatility_check, input_context, output.weekly_expected_move, output.daily_expected_move)
     build_thesis(S, output.trade_thesis)
     build_strategies(S, output.strategies, portfolio_size)
     build_exits(S, output.strategies)

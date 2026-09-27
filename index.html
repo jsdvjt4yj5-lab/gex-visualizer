@@ -418,7 +418,7 @@
 <div class="controls" style="margin-top:0;">
   <input type="text" id="emTickerInput" value="SPY" style="background:#1a1a1a; color:#eee; border:1px solid #333; border-radius:6px; padding:8px 12px; width:80px;" />
   <button id="emCheckBtn" type="button">Check range</button>
-  <button id="emCopyTvBtn" type="button" disabled title="Copies the two weekly lines - paste them at the BOTTOM of the C&amp;T Levels box, below what's already there">Copy weekly lines for TradingView</button>
+  <button id="emCopyTvBtn" type="button" disabled title="Copies the daily + weekly range lines - paste at the BOTTOM of the C&amp;T Levels box, replacing any older DY/WK lines">Copy range lines for TradingView</button>
 </div>
 <div class="status" id="emStatus"></div>
 <div id="emOutput" style="display:none; margin-top:12px; padding:14px; background:#1a1a1a; border-radius:8px; font-size:14px; line-height:1.6; color:#ddd;"></div>
@@ -1449,13 +1449,14 @@ async function runExpectedMoveCheck() {
     out.innerHTML = `
       <p style="margin:0 0 8px;"><strong>${data.ticker}</strong> spot $${data.spot_price}${data.market_hours ? '' : ' <span style="color:#999;">(outside market hours - last price)</span>'}</p>
       ${ivWarn}
+      ${ctDailyEmLine(data.daily_expected_move)}
       ${ctWeeklyEmLine(data.weekly_expected_move)}
       ${r.to_nearest_expiry ? `<p>Rolling 1σ to nearest expiry (${r.to_nearest_expiry.expiration}): ${fmtRange(r.to_nearest_expiry)}</p>` : ''}
       ${r.to_week_end ? `<p>Rolling 1σ to week end (${r.to_week_end.expiration}): ${fmtRange(r.to_week_end)}</p>` : ''}
       ${ctVolContextLine(vcx)}
       <p style="color:#888; font-size:12.5px;">IV-formula ranges with one flat IV (no skew) - downside moves are likely understated.</p>`;
     out.style.display = 'block';
-    copyBtn.disabled = data.weekly_expected_move?.status !== 'ok';
+    copyBtn.disabled = data.weekly_expected_move?.status !== 'ok' && data.daily_expected_move?.status !== 'ok';
     status.textContent = `Checked at ${new Date(data.checked_at).toLocaleTimeString()}.`;
   } catch (err) {
     status.className = 'status error';
@@ -1469,17 +1470,18 @@ async function runExpectedMoveCheck() {
 
 async function copyEmLinesToTradingView() {
   const w = currentEmCheck?.weekly_expected_move;
-  if (w?.status !== 'ok') return;
-  // Same "WK" record format the C&T Levels indicator already reads.
-  const text = [
-    `WK|${w.range_1sigma.low}|Wk 1σ low|3|2`,
-    `WK|${w.range_1sigma.high}|Wk 1σ high|3|2`,
-  ].join('\n');
+  const dy = currentEmCheck?.daily_expected_move;
+  // Same "DY"/"WK" record format the C&T Levels indicator already reads.
+  const recs = [];
+  if (dy?.status === 'ok') recs.push(`DY|${dy.range_1sigma.low}|Day 1σ low|2|2`, `DY|${dy.range_1sigma.high}|Day 1σ high|2|2`);
+  if (w?.status === 'ok') recs.push(`WK|${w.range_1sigma.low}|Wk 1σ low|3|2`, `WK|${w.range_1sigma.high}|Wk 1σ high|3|2`);
+  if (!recs.length) return;
+  const text = recs.join('\n');
   const status = document.getElementById('emStatus');
   try {
     await navigator.clipboard.writeText(text);
     status.className = 'status';
-    status.textContent = 'Copied 2 lines. In TradingView: C&T Levels -> gear -> Levels box -> paste at the bottom (keep what is there) -> OK.';
+    status.textContent = `Copied ${recs.length} lines. In TradingView: C&T Levels -> gear -> Levels box -> delete any old DY/WK lines, paste at the bottom -> OK.`;
   } catch (e) {
     status.className = 'status error';
     status.textContent = 'Clipboard blocked - copy manually:\n' + text;
@@ -3278,7 +3280,17 @@ function buildGexDataFromCurrent(data) {
     vol_context: data.vol_context ?? undefined,
     // Anchored weekly 1-sigma range (Tiger pulls only).
     weekly_expected_move: data.weekly_expected_move ?? undefined,
+    daily_expected_move: data.daily_expected_move ?? undefined,
   };
+}
+
+function ctDailyEmLine(d) {
+  if (!d) return '';
+  if (d.status !== 'ok') return `<p style="color:#999;">Daily expected move: ${d.detail || 'unavailable'}</p>`;
+  const r = d.range_1sigma;
+  const out = d.spot_position && d.spot_position !== 'inside';
+  return `<p><strong>Daily expected move (${d.target_date}):</strong> $${r.low.toFixed(2)}–$${r.high.toFixed(2)} (±${d.one_sigma_move_pct}%, from ${d.anchor_date} close $${d.anchor_close})<br>
+    <span style="color:${out ? '#f0a030' : '#ddd'};">Spot $${d.spot} is ${d.spot_sigma_from_anchor > 0 ? '+' : ''}${d.spot_sigma_from_anchor}σ from anchor — ${out ? d.spot_position + ' the range' : 'inside'}</span></p>`;
 }
 
 function ctWeeklyEmLine(w) {
@@ -3614,6 +3626,7 @@ function renderCtOutput(o) {
   html += ctSection('Volatility Check', `
     <p>10d RV: ${vc.realized_vol_10d_pct}% · 20d RV: ${vc.realized_vol_20d_pct}% · IV used: ${vc.iv_used_pct}% (${vc.iv_source})</p>
     ${vc.implied_move ? `<p>Implied weekly move (1σ): $${vc.implied_move.expected_range_usd.low.toFixed(2)}–$${vc.implied_move.expected_range_usd.high.toFixed(2)} (±${vc.implied_move.one_sigma_move_pct}%)</p>` : ''}
+    ${ctDailyEmLine(o.daily_expected_move)}
     ${ctWeeklyEmLine(o.weekly_expected_move)}
     ${ctVolContextLine(vc.vol_context)}
     ${vc.vol_regime_note ? `<p style="color:#bbb;"><em>${vc.vol_regime_note}</em></p>` : ''}
@@ -3818,6 +3831,11 @@ function buildPineScript(output, input) {
     add('implied', im.expected_range_usd.high, `Implied 1σ high`, 'color.silver', 1, 'dotted', '1σ high');
   }
   // Anchored weekly expected move (fixed all week)
+  const dem = output.daily_expected_move;
+  if (dem?.status === 'ok') {
+    add('daily', dem.range_1sigma.low, `Daily 1σ low (${dem.target_date})`, 'color.olive', 2, 'dashed', 'Day 1σ low');
+    add('daily', dem.range_1sigma.high, `Daily 1σ high (${dem.target_date})`, 'color.olive', 2, 'dashed', 'Day 1σ high');
+  }
   const wem = output.weekly_expected_move;
   if (wem?.status === 'ok') {
     add('weekly', wem.range_1sigma.low, `Weekly 1σ low (from ${wem.anchor_date})`, 'color.yellow', 2, 'dashed', 'Wk 1σ low');
@@ -3844,7 +3862,7 @@ function buildPineScript(output, input) {
     if (hit) { hit.text += ' / ' + lv.text; hit.short += ' / ' + lv.short; hit.width = Math.max(hit.width, lv.width); }
     else merged.push({ ...lv });
   });
-  const MAX_LINES = 40;
+  const MAX_LINES = 60; // under Pine's 64-plot ceiling even if hlines count toward it
   const drawn = merged.slice(0, MAX_LINES);
 
   // Readability on TradingView's dark theme: bright colors (each an
@@ -3861,6 +3879,7 @@ function buildPineScript(output, input) {
     'color.blue':   ['cThesis',  'color.rgb(100, 181, 246)', 'Thesis range / targets'],
     'color.silver': ['cImplied', 'color.rgb(158, 158, 158)', 'Implied range'],
     'color.yellow': ['cWeekly',  'color.rgb(255, 213, 79)',  'Weekly expected move'],
+    'color.olive':  ['cDaily',   'color.rgb(255, 241, 118)', 'Daily expected move'],
     'color.lime':   ['cEntry',   'color.rgb(105, 240, 174)', 'Strategy entry'],
     'color.maroon': ['cInval',   'color.rgb(240, 98, 146)',  'Strategy invalidation'],
     'color.aqua':   ['cTarget',  'color.rgb(0, 229, 255)',   'Strategy 50% target'],
@@ -3893,6 +3912,7 @@ function buildPineScript(output, input) {
     ['exits', 'Strategy 50% target + price stop (SPY equiv.)', true],
     ['thesis', 'Thesis range + targets', true],
     ['implied', 'Implied 1-sigma range', false],
+    ['daily', 'Daily expected move', true],
     ['weekly', 'Weekly expected move', true],
     ['strategies', 'Strategy breakevens', false],
   ].filter(([g]) => drawn.some((d) => d.group === g));
@@ -3936,7 +3956,7 @@ function buildPineScript(output, input) {
 // the Pine code never changes per session. Format: see that file's header.
 const CT_LEVEL_CODES = {
   cPos: 'WP', cNeg: 'WN', cFlip: 'F', cVolProf: 'A', cMa: 'M', cThesis: 'TH',
-  cImplied: 'IM', cWeekly: 'WK', cEntry: 'E', cInval: 'X', cTarget: 'T', cStopPx: 'S',
+  cImplied: 'IM', cWeekly: 'WK', cDaily: 'DY', cEntry: 'E', cInval: 'X', cTarget: 'T', cStopPx: 'S',
 };
 
 function buildCtLevelsText(output, input) {

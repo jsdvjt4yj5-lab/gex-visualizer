@@ -9,8 +9,9 @@
 //   CT|<session date YYYY-MM-DD>|<ticker>           header
 //   <code>|<price>|<label>|<line width>|<label offset in bars>
 // Codes: WP positive wall, WN negative wall, F gamma flip, A POC/VA, M moving
-// average, TH thesis range/target, IM implied range, WK weekly expected
-// move (anchored, fixed all week), E strategy entry,
+// average, TH thesis range/target, IM implied range, DY daily expected
+// move (anchored to the prior close), WK weekly expected move (anchored,
+// fixed all week), E strategy entry,
 // X invalidation, T 50% target (SPY equivalent), S price stop (SPY
 // equivalent), BE breakeven.
 //
@@ -39,6 +40,7 @@ gE = input.bool(true, "Strategy entry + invalidation", group = gs)
 gX = input.bool(true, "Strategy 50% target + price stop", group = gs)
 gT = input.bool(true, "Thesis range + targets", group = gs)
 gI = input.bool(false, "Implied 1-sigma range", group = gs)
+gDy = input.bool(true, "Daily expected move (also shown in Focus)", group = gs)
 gWk = input.bool(true, "Weekly expected move (also shown in Focus)", group = gs)
 gB = input.bool(false, "Strategy breakevens", group = gs)
 showLabels = input.bool(true, "Labels", group = gs)
@@ -68,6 +70,7 @@ cVolP   = input.color(color.rgb(206, 147, 216), "POC / VA", group = gc)
 cMa     = input.color(color.rgb(176, 190, 197), "MAs / breakevens", group = gc)
 cThesis = input.color(color.rgb(100, 181, 246), "Thesis range / targets", group = gc)
 cImpl   = input.color(color.rgb(158, 158, 158), "Implied range", group = gc)
+cDaily  = input.color(color.rgb(255, 241, 118), "Daily expected move", group = gc)
 cWeekly = input.color(color.rgb(255, 213, 79), "Weekly expected move", group = gc)
 cEntry  = input.color(color.rgb(105, 240, 174), "Strategy entry", group = gc)
 cInval  = input.color(color.rgb(240, 98, 146), "Strategy invalidation", group = gc)
@@ -86,6 +89,7 @@ codeColor(string c) =>
         "TH" => cThesis
         "IM" => cImpl
         "WK" => cWeekly
+        "DY" => cDaily
         "E"  => cEntry
         "X"  => cInval
         "T"  => cTarget
@@ -107,6 +111,7 @@ codeOn(string c) =>
         "TH" => gT
         "IM" => gI
         "WK" => gWk
+        "DY" => gDy
         "BE" => gB
         => true
 
@@ -188,7 +193,7 @@ visible(int i) =>
     c = codes.get(i)
     bool ok = true
     if focus
-        ok := c == "F" or (isWall(c) and wallRank(i) < wallsEach) or c == "E" or c == "X" or c == "T" or c == "S" or (c == "WK" and gWk)
+        ok := c == "F" or (isWall(c) and wallRank(i) < wallsEach) or c == "E" or c == "X" or c == "T" or c == "S" or (c == "WK" and gWk) or (c == "DY" and gDy)
     else
         ok := codeOn(c)
     if ok and isPlanLine(c)
@@ -296,22 +301,43 @@ if showStatus and barstate.islast
 // entry - see the PDF for the premium-based exits).
 fmtPx(float x) => na(x) ? "-" : str.tostring(x, "#.##")
 var table plans = table.new(plansPos == "top right" ? position.top_right : plansPos == "bottom left" ? position.bottom_left :
-     plansPos == "top left" ? position.top_left : position.middle_right, 8, 12,
+     plansPos == "top left" ? position.top_left : position.middle_right, 8, 13,
      bgcolor = color.new(#131722, 5), border_color = color.new(#363A45, 0), border_width = 1)
-// Weekly expected-move range from the WK lines (lowest / highest), for
-// the extra row at the bottom of the plans box.
+// Daily / weekly expected-move ranges from the DY / WK lines (lowest /
+// highest), for the extra rows at the bottom of the plans box.
 float wkLo = na
 float wkHi = na
+float dyLo = na
+float dyHi = na
 if codes.size() > 0
     for j = 0 to codes.size() - 1
+        pj = prices.get(j)
         if codes.get(j) == "WK"
-            pj = prices.get(j)
             wkLo := na(wkLo) ? pj : math.min(wkLo, pj)
             wkHi := na(wkHi) ? pj : math.max(wkHi, pj)
+        else if codes.get(j) == "DY"
+            dyLo := na(dyLo) ? pj : math.min(dyLo, pj)
+            dyHi := na(dyHi) ? pj : math.max(dyHi, pj)
 hasWk = gWk and not na(wkLo) and not na(wkHi) and wkHi > wkLo
+hasDy = gDy and not na(dyLo) and not na(dyHi) and dyHi > dyLo
 
-if showPlans and barstate.islast and (plName.size() > 0 or hasWk)
-    table.clear(plans, 0, 0, 7, 11)  // drop cells left over from the wider layout
+// One range row in the plans box: name | range (merged) | where price is.
+rangeRow(int row, string name, float lo, float hi, color col) =>
+    lastCol = plansFull ? 7 : 5
+    string pos = close > hi ? "ABOVE +" + str.tostring(close - hi, "#.##") :
+         close < lo ? "BELOW -" + str.tostring(lo - close, "#.##") :
+         "inside · " + str.tostring(math.min(hi - close, close - lo), "#.##") + " to edge"
+    color posBg = close > hi or close < lo ? color.new(col, 30) : na
+    table.cell(plans, 0, row, name, text_color = col, text_size = size.small, text_halign = text.align_left)
+    table.cell(plans, 1, row, "", text_size = size.small)
+    table.cell(plans, 2, row, str.tostring(lo, "#.##") + "  –  " + str.tostring(hi, "#.##"), text_color = col, text_size = size.small)
+    for c = 3 to lastCol - 1
+        table.cell(plans, c, row, "", text_size = size.small)
+    table.merge_cells(plans, 2, row, lastCol - 1, row)
+    table.cell(plans, lastCol, row, pos, text_color = color.white, bgcolor = posBg, text_size = size.small)
+
+if showPlans and barstate.islast and (plName.size() > 0 or hasWk or hasDy)
+    table.clear(plans, 0, 0, 7, 12)  // drop cells left over from the wider layout
     hdr = plansFull ? array.from("Plan", "Contracts", "Entry", "50% tgt", "Stop", "Inval", "Trade", "vs entry") :
          array.from("Plan", "Contracts", "Entry", "50% tgt", "Stop", "vs entry")
     for c = 0 to hdr.size() - 1
@@ -335,20 +361,12 @@ if showPlans and barstate.islast and (plName.size() > 0 or hasWk)
                 table.cell(plans, 5, r, fmtPx(plInv.get(i)), text_color = cInval, bgcolor = rowBg, text_size = size.small)
                 table.cell(plans, 6, r, plInfo.get(i), text_color = color.silver, bgcolor = rowBg, text_size = size.small, text_halign = text.align_left)
             table.cell(plans, plansFull ? 7 : 5, r, dist, text_color = color.white, bgcolor = na(distBg) ? rowBg : distBg, text_size = size.small)
+    int nextRow = math.min(plName.size(), 10) + 1
+    if hasDy
+        rangeRow(nextRow, "Day 1σ range", dyLo, dyHi, cDaily)
+        nextRow += 1
     if hasWk
-        wr = math.min(plName.size(), 10) + 1
-        lastCol = plansFull ? 7 : 5
-        string wkPos = close > wkHi ? "ABOVE +" + str.tostring(close - wkHi, "#.##") :
-             close < wkLo ? "BELOW -" + str.tostring(wkLo - close, "#.##") :
-             "inside · " + str.tostring(math.min(wkHi - close, close - wkLo), "#.##") + " to edge"
-        color wkPosBg = close > wkHi or close < wkLo ? color.new(cWeekly, 30) : na
-        table.cell(plans, 0, wr, "Wk 1σ range", text_color = cWeekly, text_size = size.small, text_halign = text.align_left)
-        table.cell(plans, 1, wr, "", text_size = size.small)
-        table.cell(plans, 2, wr, fmtPx(wkLo) + "  –  " + fmtPx(wkHi), text_color = cWeekly, text_size = size.small)
-        for c = 3 to lastCol - 1
-            table.cell(plans, c, wr, "", text_size = size.small)
-        table.merge_cells(plans, 2, wr, lastCol - 1, wr)
-        table.cell(plans, lastCol, wr, wkPos, text_color = color.white, bgcolor = wkPosBg, text_size = size.small)
+        rangeRow(nextRow, "Wk 1σ range", wkLo, wkHi, cWeekly)
 
 // ── Alerts: one TradingView alert covers every plan and every event.
 // Create it with Condition = "C&T" -> "Any alert() function call".

@@ -743,6 +743,44 @@ def compute_weekly_expected_move(symbol, spot, week_expiries, daily_rows, curren
         return {"status": "unavailable", "detail": f"Weekly expected move failed: {e}"}
 
 
+def compute_daily_expected_move(spot, future_dates, daily_rows, current_iv, current_iv_source):
+    """1-sigma range for ONE trading day, anchored to the previous close
+    and fixed for that day. Target day = the nearest listed SPY
+    expiration (SPY lists every trading day, so this is the next session,
+    holiday-aware). IV is today's 30-day IV - unlike the weekly range there
+    is no prior-day IV lookup, so a re-pull later in the day can shift it
+    slightly. Time = 1 trading day (1/252). Never raises."""
+    try:
+        if not future_dates:
+            return {"status": "unavailable", "detail": "No listed expirations - target day unknown."}
+        target = date.fromisoformat(future_dates[0])
+        if not daily_rows:
+            return {"status": "unavailable", "detail": "Daily bars unavailable - no anchor close."}
+        prior = [r for r in daily_rows if r["date"] < target]
+        if not prior:
+            return {"status": "unavailable", "detail": "No close before the target day - anchor unknown."}
+        anchor = prior[-1]
+        one_sigma = anchor["close"] * current_iv * math.sqrt(1 / 252)
+        pos = (spot - anchor["close"]) / one_sigma if one_sigma > 0 else None
+        return {
+            "status": "ok",
+            "target_date": target.isoformat(),
+            "anchor_close": round(anchor["close"], 2),
+            "anchor_date": anchor["date"].isoformat(),
+            "iv_used_pct": round(current_iv * 100, 2),
+            "iv_source": current_iv_source,
+            "one_sigma_move_usd": round(one_sigma, 2),
+            "one_sigma_move_pct": round(one_sigma / anchor["close"] * 100, 2),
+            "range_1sigma": {"low": round(anchor["close"] - one_sigma, 2), "high": round(anchor["close"] + one_sigma, 2)},
+            "spot": round(spot, 2),
+            "spot_sigma_from_anchor": round(pos, 2) if pos is not None else None,
+            "spot_position": None if pos is None else ("inside" if abs(pos) < 1 else ("above" if pos > 0 else "below")),
+            "method": "anchored_prev_close_1_trading_day",
+        }
+    except Exception as e:
+        return {"status": "unavailable", "detail": f"Daily expected move failed: {e}"}
+
+
 def week_expiries_for_expected_move(future_dates):
     """Listed expirations in the week of the nearest upcoming expiration
     (this week on a weekday; next week if run after Friday's close)."""
@@ -781,6 +819,7 @@ def handle_expected_move(quote_client, symbol):
         daily_rows = None
 
     weekly = compute_weekly_expected_move(symbol, spot, week_expiries, daily_rows, iv, iv_source)
+    daily = compute_daily_expected_move(spot, future, daily_rows, iv, iv_source)
 
     rolling = {}
     rolling["to_nearest_expiry"] = compute_implied_move_1sigma(spot, iv, future[0], now_et)
@@ -796,6 +835,7 @@ def handle_expected_move(quote_client, symbol):
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "market_hours": in_hours,
         "weekly_expected_move": weekly,
+        "daily_expected_move": daily,
         "rolling": rolling,
         "vol_context": {
             "iv_30d_pct": round(iv * 100, 2),
@@ -2065,6 +2105,10 @@ class handler(BaseHTTPRequestHandler):
                 "diagnostics": diagnostics,
                 "data_quality": data_quality,
                 "gap_check": compute_gap_check(quote_client, symbol, levels, today, daily_rows),
+                "daily_expected_move": compute_daily_expected_move(
+                    spot_price_final, sorted(future["date"].tolist()), daily_rows,
+                    underlying_iv, underlying_iv_source,
+                ),
                 "weekly_expected_move": compute_weekly_expected_move(
                     symbol, spot_price_final, week_expiries_for_em, daily_rows,
                     underlying_iv, underlying_iv_source,

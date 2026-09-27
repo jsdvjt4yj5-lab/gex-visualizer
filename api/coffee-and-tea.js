@@ -787,6 +787,7 @@ export default async function handler(req, res) {
     parsed.gap_check = input.gex_data.gap_check ?? null;
     // Same pattern: the anchored weekly range, echoed verbatim.
     parsed.weekly_expected_move = input.gex_data.weekly_expected_move ?? null;
+    parsed.daily_expected_move = input.gex_data.daily_expected_move ?? null;
 
     if (parsed.volatility_check) {
       parsed.volatility_check.iv_used_pct = ivUsedPct;
