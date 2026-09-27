@@ -690,18 +690,21 @@ def compute_weekly_expected_move(symbol, spot, week_expiries, daily_rows, curren
         anchor_close = anchor["close"]
         anchor_date = anchor["date"]
 
-        # Anchor IV: the last stored Tiger snapshot from before this week
-        # (taken ~1hr after that day's open, not at the close - close
-        # enough for a weekly range). Falls back to today's IV, flagged.
+        # Anchor IV: the last stored Tiger snapshot dated ON OR BEFORE the
+        # anchor trading day (taken ~1hr after that day's open, not at the
+        # close - close enough for a weekly range). Bounded by the anchor
+        # date, not by Monday, so a weekend pull (dated Saturday/Sunday)
+        # can't replace it mid-week and move a range that is meant to stay
+        # fixed. Falls back to today's IV, flagged.
         iv, iv_basis = None, None
-        snap = fetch_prior_snapshot_from_d1(symbol, week_monday.isoformat())
+        snap = fetch_prior_snapshot_from_d1(symbol, (anchor_date + timedelta(days=1)).isoformat())
         if snap:
             gi = snap.get("gamma_inputs") or {}
             snap_iv = gi.get("underlying_iv_used_as_fallback")
             snap_date = (snap.get("captured_at") or "")[:10]
             fresh = False
             try:
-                fresh = (week_monday - date.fromisoformat(snap_date)).days <= 7
+                fresh = (anchor_date - date.fromisoformat(snap_date)).days <= 7
             except ValueError:
                 pass
             if (isinstance(snap_iv, (int, float)) and snap_iv > 0 and fresh
