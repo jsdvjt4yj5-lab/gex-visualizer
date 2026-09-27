@@ -51,6 +51,15 @@ plansFull  = input.bool(false, "Plans box: show invalidation + trade details", g
 plansPos   = input.string("middle right", "Plans box position", options = ["middle right", "top right", "bottom left", "top left"], group = gs)
 atEntryPts = input.float(0.25, "Plans box: 'at entry' within (points)", minval = 0, step = 0.05, group = gs)
 
+gh = "Touch highlight"
+hlOn    = input.bool(true, "Highlight a level when price hits it", group = gh)
+hlScope = input.string("All shown levels", "Levels to highlight", options = ["All shown levels", "Walls + flip only", "Plan levels only"], group = gh)
+hlPts   = input.float(0.10, "Counts as a hit within (points)", minval = 0, step = 0.05, group = gh,
+     tooltip = "A level is 'hit' when the current bar's range crosses it, or price is within this many points of it.")
+hlBlink = input.bool(true, "Blink while hit", group = gh,
+     tooltip = "Alternates white / normal colour. Pine only redraws on new ticks, so the blink is irregular and freezes when the market is quiet or closed.")
+hlBg    = input.bool(true, "Tint the chart background on a hit", group = gh)
+
 gc = "Colours"
 cPos    = input.color(color.rgb(38, 198, 166), "Positive gamma wall", group = gc)
 cNeg    = input.color(color.rgb(255, 82, 82), "Negative gamma wall", group = gc)
@@ -186,6 +195,18 @@ visible(int i) =>
         ok := planSel == "All" or (planSel != "None" and str.startswith(texts.get(i), planSel + " "))
     ok
 
+// Is level i being hit on the current bar?
+hitNow(int i) =>
+    c = codes.get(i)
+    px = prices.get(i)
+    inScope = hlScope == "All shown levels" or
+         (hlScope == "Walls + flip only" and (isWall(c) or c == "F")) or
+         (hlScope == "Plan levels only" and isPlanLine(c))
+    hlOn and inScope and ((low <= px and high >= px) or math.abs(close - px) <= hlPts)
+
+// Blink phase: flips every half second of wall-clock time.
+blinkOn = hlBlink and math.floor(timenow / 500) % 2 == 0
+
 // ── Lines + labels (recreated on the last bar so they follow price).
 // Levels at the SAME price share one label ("766 -195M · S2 entry"), and
 // nearby labels are staggered sideways so nothing overlaps.
@@ -202,21 +223,28 @@ if barstate.islast
         vp = array.new<float>()
         vt = array.new<string>()
         vc = array.new<color>()
+        vh = array.new<bool>()
         seen = map.new<float, int>()
         for i = 0 to codes.size() - 1
             if visible(i)
                 c = codes.get(i)
                 px = prices.get(i)
+                hit = hitNow(i)
+                color lc = hit and blinkOn ? color.white : codeColor(c)
                 lns.push(line.new(bar_index - 1, px, bar_index, px, extend = extend.both,
-                     color = codeColor(c), width = widths.get(i), style = codeStyle(c)))
+                     color = lc, width = hit ? math.min(widths.get(i) + 2, 6) : widths.get(i),
+                     style = hit ? line.style_solid : codeStyle(c)))
                 if seen.contains(px)
                     k = seen.get(px)
                     vt.set(k, vt.get(k) + " · " + texts.get(i))
+                    if hit
+                        vh.set(k, true)
                 else
                     seen.put(px, vp.size())
                     vp.push(px)
                     vt.push(texts.get(i))
                     vc.push(codeColor(c))
+                    vh.push(hit)
         if showLabels and vp.size() > 0
             idx = vp.sort_indices(order.ascending)
             float prevPx = na
@@ -225,10 +253,20 @@ if barstate.islast
                 k = idx.get(j)
                 px = vp.get(k)
                 off = not na(prevPx) and px - prevPx < crowdGap ? (prevOff >= 38 ? 2 : prevOff + 18) : 2
-                labs.push(label.new(bar_index + off, px, vt.get(k), style = label.style_label_left,
-                     color = color.new(vc.get(k), 10), textcolor = color.black, size = lblSize))
+                isHit = vh.get(k)
+                labs.push(label.new(bar_index + off, px, (isHit ? "● HIT  " : "") + vt.get(k), style = label.style_label_left,
+                     color = isHit and blinkOn ? color.white : color.new(vc.get(k), 10), textcolor = color.black, size = lblSize))
                 prevPx := px
                 prevOff := off
+
+// Background tint on the live bar while any shown level is being hit.
+bool anyHit = false
+if hlOn and hlBg and barstate.islast and codes.size() > 0
+    for i = 0 to codes.size() - 1
+        if visible(i) and hitNow(i)
+            anyHit := true
+            break
+bgcolor(anyHit ? color.new(blinkOn ? color.white : cWeekly, 85) : na)
 
 // ── Status box: is this today's data, for this ticker?
 var table status = table.new(position.bottom_right, 1, 2, bgcolor = color.new(#131722, 10),
