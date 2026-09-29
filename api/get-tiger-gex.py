@@ -422,6 +422,87 @@ def bs_gamma(spot, strike, t_years, sigma, risk_free_rate, dividend_yield):
     return math.exp(-dividend_yield * t_years) * pdf_d1 / (spot * sigma * sqrt_t)
 
 
+import time
+
+BRIEF_IV_BATCH = 30
+
+
+def _norm_identifier(x):
+    return " ".join(str(x).split()) if x is not None else None
+
+
+def _parse_brief_vol(v):
+    """Tiger's brief volatility may be a string like '29.29%' or a number.
+    Returns a fraction (0.2929) or None if unusable."""
+    if v is None:
+        return None
+    try:
+        if isinstance(v, str):
+            t = v.strip()
+            f = float(t[:-1]) / 100.0 if t.endswith("%") else float(t)
+        else:
+            f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(f) or f <= 0:
+        return None
+    if f > 5:
+        f = f / 100.0
+    if f < 0.01 or f > 5:
+        return None
+    return f
+
+
+def fetch_brief_ivs(quote_client, chain, deadline):
+    """Per-contract IV from get_option_briefs, keyed by normalized
+    identifier. Never raises - any failure just returns fewer IVs, and
+    those rows keep the flat underlying-IV fallback."""
+    diag = {"requested": 0, "calls": 0, "returned_rows": 0, "usable": 0,
+            "field": None, "columns": None, "sample": None, "error": None,
+            "stopped_by_time_budget": False}
+    out = {}
+    try:
+        if chain is None or chain.empty:
+            diag["error"] = "empty chain"
+            return out, diag
+        if "identifier" not in chain.columns:
+            diag["error"] = "chain has no identifier column"
+            diag["columns"] = [str(c) for c in chain.columns]
+            return out, diag
+        ids = [i for i in (_norm_identifier(x) for x in chain["identifier"].tolist()) if i]
+        ids = list(dict.fromkeys(ids))
+        diag["requested"] = len(ids)
+        for start in range(0, len(ids), BRIEF_IV_BATCH):
+            if time.monotonic() > deadline:
+                diag["stopped_by_time_budget"] = True
+                break
+            batch = ids[start:start + BRIEF_IV_BATCH]
+            try:
+                briefs = quote_client.get_option_briefs(batch)
+            except Exception as e:
+                diag["error"] = str(e)[:300]
+                break
+            diag["calls"] += 1
+            if briefs is None or len(briefs) == 0:
+                continue
+            if diag["columns"] is None:
+                diag["columns"] = [str(c) for c in briefs.columns]
+                diag["sample"] = {str(k): repr(v) for k, v in briefs.iloc[0].to_dict().items()}
+            field = next((c for c in ("volatility", "implied_vol", "implied_volatility") if c in briefs.columns), None)
+            diag["field"] = field
+            if field is None or "identifier" not in briefs.columns:
+                break
+            for _, b in briefs.iterrows():
+                diag["returned_rows"] += 1
+                v = _parse_brief_vol(b[field])
+                if v is not None:
+                    out[_norm_identifier(b["identifier"])] = v
+    except Exception as e:
+        diag["error"] = "unexpected: " + str(e)[:300]
+    diag["usable"] = len(out)
+    return out, diag
+
+
 def _normalize_pct_0_100(value):
     """Tiger doesn't document whether iv_metric.rank/percentile come back
     on a 0-1 or 0-100 scale. Values <= 1.0 are treated as fractions and
@@ -1780,6 +1861,7 @@ class handler(BaseHTTPRequestHandler):
             expiries_with_data = []
             expiries_empty = []
             diagnostics = {}  # per-expiry row counts, to make future debugging faster
+            brief_deadline = time.monotonic() + get_config_float("TIGER_BRIEF_IV_BUDGET_S", 6.0)
 
             for expiry in expiries_to_fetch:
                 t_years = years_to_expiry(expiry, now_et)
@@ -1799,6 +1881,8 @@ class handler(BaseHTTPRequestHandler):
                     )
                     chain = chain[in_band]
 
+                brief_ivs, brief_diag = fetch_brief_ivs(quote_client, chain, brief_deadline)
+                used_brief_iv_rows = 0
                 total_rows = len(chain)
                 skipped_missing = 0        # raw_strike/oi was None (iv is no longer a skip reason - see fallback below)
                 skipped_nan = 0            # converted to float but was NaN
@@ -1857,9 +1941,15 @@ class handler(BaseHTTPRequestHandler):
                     # (this one would include dust/duplicate rows the other
                     # excludes) and a rate computed from them can exceed 100%.
                     used_fallback_this_row = False
+                    used_brief_this_row = False
                     if iv <= 0:
-                        iv = underlying_iv
-                        used_fallback_this_row = True
+                        b_iv = brief_ivs.get(_norm_identifier(row.get("identifier"))) if brief_ivs else None
+                        if b_iv is not None:
+                            iv = b_iv
+                            used_brief_this_row = True
+                        else:
+                            iv = underlying_iv
+                            used_fallback_this_row = True
 
                     contract_key = (strike, row["put_call"])
                     if contract_key in seen_contracts:
@@ -1877,6 +1967,8 @@ class handler(BaseHTTPRequestHandler):
                     if abs(contract_gex) >= 1:  # ignore dust-level contributions when checking "had data"
                         day_had_data = True
                         used_rows += 1
+                        if used_brief_this_row:
+                            used_brief_iv_rows += 1
                         if used_fallback_this_row:
                             used_fallback_iv_rows += 1
                     # SIGN CONVENTION (explicit, written contract - audited Sept 2026):
@@ -1898,7 +1990,7 @@ class handler(BaseHTTPRequestHandler):
                     elif row["put_call"] == "PUT":
                         by_strike[strike] -= contract_gex
 
-                diagnostics[expiry] = {
+                diagnostics[expiry] = {"used_brief_iv_rows": used_brief_iv_rows, "brief_iv": brief_diag,
                     "t_years": t_years,
                     "total_rows": total_rows,
                     "used_rows": used_rows,
