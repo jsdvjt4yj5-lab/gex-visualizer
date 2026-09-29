@@ -156,7 +156,7 @@ is choosing which strikes form each structure, based on the GEX read.
 3. Strategy generation: map each market view to ONE of these defined-risk
 structures - NEVER a naked short strike:
 - Iron Condor (range holds, high confidence): short call+long call wing /
-  short put+long put wing, symmetric around spot
+  short put+long put wing - only when rule 10c allows, strikes per 10c
 - Iron Butterfly (tighter pin): short straddle ATM + long wings further out
 - Bull Put Spread (downside holds): short put near support + long put further below
 - Bear Call Spread (ceiling holds): short call near resistance + long call further above
@@ -257,6 +257,20 @@ e.g. spot already near or outside the weekly range edge means much of
 the week's expected move is used up. It is context, not a level price
 must respect. If absent or unavailable, do not mention it.
 
+10c. IRON CONDOR RULES (0DTE and weekly reads): propose an Iron Condor
+only when ALL of these hold - spot is in positive gamma (at or above the
+gamma flip); volatility_check.verdict is "rich"; near_term_stress is not
+true; no CPI, FOMC decision or NFP release falls between now and
+expiration in macro_events_this_window; gap_check.status is not
+"gap_through_wall". If any fails, do not propose a condor - choose
+another structure, and if a condor would otherwise look tempting, list
+it in "avoid" naming the failed condition. Strike placement: each short
+strike OUTSIDE the implied_move range (10a) AND at or beyond the nearest
+major GEX wall on that side, with extra room on the put side - the
+result is usually not symmetric around spot. Use equal wing widths on
+both sides. End that strategy's stop_loss_structural_trigger with
+"Time stop 15:00 ET expiry day." (counts toward its 15-word limit).
+
 10b. VOL REGIME CONTEXT (when gex_data.vol_context is present): use
 iv_rank_52w_pct (where today's IV sits in its 52-week range, 0-100) and
 vix_term_structure (curve_shape: contango/flat/backwardation;
@@ -309,7 +323,7 @@ in market_structure.summary or strategy_tilt; in "calm", you may state
 the read is in the regime where it has historically been most reliable.
 Never imply walls will contain price in any regime.
 
-15. OPENING GAP CHECK (server-computed, Tiger pulls only): if
+16. OPENING GAP CHECK (server-computed, Tiger pulls only): if
 gex_data.gap_check.status is "gap_through_wall", today's 9:30 open jumped
 across one or more concentrated walls (listed in walls_gapped) versus
 yesterday's close. Apply the gap management rule below to those strikes:
